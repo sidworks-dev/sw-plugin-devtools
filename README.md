@@ -187,8 +187,8 @@ Website: [www.sidworks.nl](https://www.sidworks.nl)
 Contributions are welcome! Please feel free to submit issues or pull requests.
 
 **Important**: This project consists of two components that work together:
-- **Shopware Plugin** (this directory)
-- **Chrome Extension** (`chrome-extension/` directory)
+- **[Shopware Plugin](https://github.com/sidworks-dev/sw-plugin-devtools)**
+- **[Chrome extension](https://github.com/sidworks-dev/sw-plugin-dev-tools-chrome-extension)**
 
 When updating the plugin, ensure you also update the extension if the changes affect the data format or API. Similarly, when updating the extension, verify compatibility with the plugin. Both components should be kept in sync.
 
