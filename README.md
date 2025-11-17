@@ -13,7 +13,7 @@ Never hunt for a Twig file again. Sidworks DevTools reveals the exact template a
 - **Security First**: Only active in debug mode (`APP_ENV=dev`) with configurable on/off switch
 - **Zero Production Impact**: Completely disabled in production environments
 
-### Chrome Extension
+### [Chrome extension](https://github.com/sidworks-dev/sw-plugin-devtools-chrome-extension)
 - **DevTools Sidebar Integration**: Adds a "Shopware" panel in Chrome's Elements sidebar
 - **Instant Template Info**: Select any element to see its template, block name, file path, and inheritance chain
 - **Smart IDE Integration**: One-click to open templates at the exact line in PHPStorm or VSCode
