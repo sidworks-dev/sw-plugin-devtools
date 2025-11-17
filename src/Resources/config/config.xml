@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/shopware/platform/master/src/Core/System/SystemConfig/Schema/config.xsd">
+
+    <card>
+        <title>Sidworks DevTools Configuration</title>
+        <title lang="de-DE">Sidworks DevTools Konfiguration</title>
+
+        <input-field type="bool">
+            <name>enabled</name>
+            <label>Enable DevTools</label>
+            <label lang="de-DE">DevTools aktivieren</label>
+            <helpText>Enable template debugging comments in HTML output (only works when Shopware debug mode is active)</helpText>
+            <helpText lang="de-DE">Template-Debugging-Kommentare in der HTML-Ausgabe aktivieren (funktioniert nur, wenn der Shopware-Debug-Modus aktiv ist)</helpText>
+            <defaultValue>true</defaultValue>
+        </input-field>
+
+        <input-field type="text">
+            <name>projectPath</name>
+            <label>Project Path (for PHPStorm deep links)</label>
+            <label lang="de-DE">Projekt-Pfad (für PHPStorm Deep-Links)</label>
+            <placeholder>/Users/username/path/to/project</placeholder>
+            <helpText>Override the project path for PHPStorm deep links. Leave empty for auto-detection. Required for Docker/DDEV environments.</helpText>
+            <helpText lang="de-DE">Projekt-Pfad für PHPStorm Deep-Links überschreiben. Leer lassen für automatische Erkennung. Erforderlich für Docker/DDEV-Umgebungen.</helpText>
+        </input-field>
+    </card>
+</config>

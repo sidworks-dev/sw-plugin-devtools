@@ -1,0 +1,29 @@
+{
+    "name": "sidworks/sw-plugin-devtools",
+    "description": "Sidworks Developer tools for Shopware 6",
+    "type": "shopware-platform-plugin",
+    "license": "MIT",
+    "version": "1.0.0",
+    "authors": [
+        {
+            "name": "Sidworks"
+        }
+    ],
+    "require": {
+        "shopware/core": "^6.6"
+    },
+    "autoload": {
+        "psr-4": {
+            "Sidworks\\DevTools\\": "src/"
+        }
+    },
+    "extra": {
+        "shopware-plugin-class": "Sidworks\\DevTools\\SidworksDevTools",
+        "label": {
+            "en-GB": "Sidworks Developer Tools"
+        },
+        "description": {
+            "en-GB": "Developer tools to inspect HTML elements and identify their source Twig templates"
+        }
+    }
+}
