@@ -2,8 +2,6 @@
 
 Never hunt for a Twig file again. Sidworks DevTools reveals the exact template and block behind every Shopware 6 element and lets you jump straight into your IDE with a single click.
 
-![Demo](./docs/sw-devtools.gif)
-
 ## Features
 
 ### Shopware Plugin
