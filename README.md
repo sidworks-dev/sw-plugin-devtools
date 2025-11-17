@@ -56,7 +56,7 @@ bin/console cache:clear
 2. Open Chrome and navigate to `chrome://extensions/`
 3. Enable **Developer mode** (toggle in top right)
 4. Click **Load unpacked**
-5. Select the extension directortu
+5. Select the extension directory
 6. The extension icon will appear in your toolbar
 
 ## Configuration
