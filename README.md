@@ -50,7 +50,7 @@ bin/console cache:clear
 
 ### Chrome Extension Installation
 
-1. Download [Chrome extension](https://github.com/sidworks-dev/sw-plugin-dev-tools-chrome-extension)
+1. Download [Chrome extension](https://github.com/sidworks-dev/sw-plugin-devtools-chrome-extension)
 2. Open Chrome and navigate to `chrome://extensions/`
 3. Enable **Developer mode** (toggle in top right)
 4. Click **Load unpacked**
@@ -88,7 +88,7 @@ The plugin will automatically inject this path into the page, so you don't need 
 ### Basic Workflow
 
 1. **Enable debug mode** in Shopware (`.env`: `APP_ENV=dev`)
-2. **Install both** the plugin and [Chrome extension](https://github.com/sidworks-dev/sw-plugin-dev-tools-chrome-extension)
+2. **Install both** the plugin and [Chrome extension](https://github.com/sidworks-dev/sw-plugin-devtools-chrome-extension)
 3. **Visit your storefront** in Chrome
 4. **Open DevTools** (F12 or right-click → Inspect)
 5. **Select any element** in the Elements panel
@@ -167,7 +167,7 @@ The extension doesn't just open templates at the block start—it searches for t
 
 ## Browser Compatibility
 
-The [Chrome extension](https://github.com/sidworks-dev/sw-plugin-dev-tools-chrome-extension) works with:
+The [Chrome extension](https://github.com/sidworks-dev/sw-plugin-devtools-chrome-extension) works with:
 - Google Chrome (Manifest V3)
 - Microsoft Edge (Chromium-based)
 - Brave
@@ -188,7 +188,7 @@ Contributions are welcome! Please feel free to submit issues or pull requests.
 
 **Important**: This project consists of two components that work together:
 - **[Shopware Plugin](https://github.com/sidworks-dev/sw-plugin-devtools)**
-- **[Chrome extension](https://github.com/sidworks-dev/sw-plugin-dev-tools-chrome-extension)**
+- **[Chrome extension](https://github.com/sidworks-dev/sw-plugin-devtools-chrome-extension)**
 
 When updating the plugin, ensure you also update the extension if the changes affect the data format or API. Similarly, when updating the extension, verify compatibility with the plugin. Both components should be kept in sync.
 
