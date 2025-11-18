@@ -5,15 +5,10 @@ namespace Sidworks\DevTools\Twig;
 use Twig\Environment;
 use Twig\Node\BlockNode;
 use Twig\Node\Expression\ConstantExpression;
-use Twig\Node\ModuleNode;
 use Twig\Node\Node;
 use Twig\Node\PrintNode;
 use Twig\NodeVisitor\NodeVisitorInterface;
 
-/**
- * Simplified Twig Node Visitor
- * Only adds BLOCK_START/END comments to identify which template each block comes from
- */
 class TemplateDebugNodeVisitor implements NodeVisitorInterface
 {
     private int $blockCounter = 0;
