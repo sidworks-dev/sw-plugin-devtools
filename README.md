@@ -22,7 +22,7 @@ Never hunt for a Twig file again. Sidworks DevTools reveals the exact template a
 
 ## Requirements
 
-- Shopware 6.6.x
+- Shopware 6.6.x or 6.7.x
 - PHP 8.1 or higher
 - Chrome or Edge browser (for extension)
 
