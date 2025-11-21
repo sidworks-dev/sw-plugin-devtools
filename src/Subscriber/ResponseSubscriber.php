@@ -90,7 +90,7 @@ class ResponseSubscriber implements EventSubscriberInterface
     {
         // Simple approach: find all attribute values (text between ="" quotes)
         // and remove SWDT comments from them
-        return preg_replace_callback(
+        $result = preg_replace_callback(
             '/(\w+)="((?:[^"\\\\]|\\\\.)*)"/s',
             function ($matches) {
                 $attrName = $matches[1];
@@ -107,6 +107,9 @@ class ResponseSubscriber implements EventSubscriberInterface
             },
             $content
         );
+
+        // Return original content if preg_replace_callback failed (returns null on error)
+        return $result ?? $content;
     }
 
     /**
@@ -122,7 +125,7 @@ class ResponseSubscriber implements EventSubscriberInterface
         foreach ($specialTags as $tag) {
             // Match opening tag, content, and closing tag
             // Use backreference \1 to match the same tag name in closing tag
-            $content = preg_replace_callback(
+            $result = preg_replace_callback(
                 '/<(' . $tag . ')([^>]*)>(.*?)<\/\1>/si',
                 function ($matches) {
                     $tag = $matches[1];
@@ -144,6 +147,9 @@ class ResponseSubscriber implements EventSubscriberInterface
                 },
                 $content
             );
+
+            // Keep original content if preg_replace_callback failed (returns null on error)
+            $content = $result ?? $content;
         }
 
         return $content;
