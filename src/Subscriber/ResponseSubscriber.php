@@ -60,7 +60,7 @@ class ResponseSubscriber implements EventSubscriberInterface
         $templates = TemplateRegistry::all();
 
         $debugScript = sprintf(
-            '<script type="application/json" id="sidworks-shopware-devtools-data">%s</script>',
+            '<script type="application/json" id="sidworks-devtools-data">%s</script>',
             json_encode([
                 'projectPath' => $projectPath,
                 'timestamp' => time(),
