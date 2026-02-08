@@ -20,11 +20,18 @@ Never hunt for a Twig file again. Sidworks DevTools reveals the exact template a
 - **Intelligent Line Search**: Automatically finds the precise element line by searching for classes, IDs, and tags
 - **Multi-Editor Support**: Works with PHPStorm and VSCode
 
+### Fast SCSS Watcher with Hot Reload
+- **Instant SCSS compilation**: Uses Bun + dart-sass for ~500ms builds (vs minutes with webpack)
+- **CSS Hot Reload**: Changes apply instantly without page refresh via SSE (Server-Sent Events)
+- **Auto-detected config**: Reads Shopware's theme config, plugin styles, and feature flags automatically
+- **Zero proxy setup**: No BrowserSync or proxy needed — just a lightweight reload server on port 9779
+
 ## Requirements
 
 - Shopware 6.6.x or 6.7.x
 - PHP 8.1 or higher
 - Chrome or Edge browser (for extension)
+- [Bun](https://bun.sh) runtime (for SCSS watcher)
 
 ## Installation
 
@@ -87,7 +94,23 @@ The plugin will automatically inject this path into the page, so you don't need 
 
 ## Usage
 
-### Basic Workflow
+### SCSS Watcher
+
+Run from your project root (on the host, not inside DDEV):
+
+```bash
+custom/plugins/SidworksDevTools/bin/watch.sh
+```
+
+This will:
+1. Install the `sass` dependency (first run only)
+2. Dump theme config and compile the theme once
+3. Start watching for SCSS changes in `custom/plugins/`, storefront SCSS, and theme variables
+4. Launch an SSE server on `http://localhost:9779` for hot reload
+
+The plugin's Twig template automatically injects the hot-reload client script, so CSS changes apply instantly without refreshing the page.
+
+### Template Inspector — Basic Workflow
 
 1. **Enable debug mode** in Shopware (`.env`: `APP_ENV=dev`)
 2. **Install both** the plugin and [Chrome extension](https://github.com/sidworks-dev/sw-plugin-devtools-chrome-extension)
