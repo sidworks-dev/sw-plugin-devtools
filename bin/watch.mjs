@@ -1,354 +1,55 @@
 #!/usr/bin/env node
-/**
- * SidworksDevTools — Fast Multi-Theme SCSS Watcher
- *
- * Compiles Shopware 6.7 storefront SCSS with dart-sass (~500ms) and
- * runs an SSE server for instant CSS hot-reload without page refresh.
- *
- * Works with both Bun and Node.js.
- *
- * Usage: bun run custom/plugins/SidworksDevTools/bin/watch.mjs
- *    or: node custom/plugins/SidworksDevTools/bin/watch.mjs
- */
-import { readFileSync, writeFileSync, mkdirSync, existsSync, watch } from 'node:fs';
-import { resolve, dirname, join } from 'node:path';
-import { spawnSync } from 'node:child_process';
-import { createServer } from 'node:http';
-import * as sass from 'sass';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { existsSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 
-const PLUGIN_ROOT = resolve(dirname(new URL(import.meta.url).pathname), '..');
+const currentFile = fileURLToPath(import.meta.url);
+const scriptDir = dirname(currentFile);
+const pluginRoot = resolve(scriptDir, '..');
 
-// Find Shopware project root by walking up until we find vendor/shopware
-function findProjectRoot() {
-    let dir = PLUGIN_ROOT;
+function findProjectRoot(startDir) {
+    let dir = startDir;
+
     while (dir !== '/') {
-        if (existsSync(join(dir, 'vendor/shopware')) && existsSync(join(dir, 'var'))) {
+        if (existsSync(resolve(dir, 'vendor/shopware')) && existsSync(resolve(dir, 'var'))) {
             return dir;
         }
+
         dir = dirname(dir);
     }
+
     return null;
 }
 
-const PROJECT_ROOT = findProjectRoot();
-if (!PROJECT_ROOT) {
-    console.error('  \x1b[31m✗\x1b[0m Could not find Shopware project root.');
+const projectRoot = findProjectRoot(pluginRoot);
+if (!projectRoot) {
+    console.error('Could not find Shopware project root.');
     process.exit(1);
 }
 
-const STOREFRONT_APP = join(PROJECT_ROOT, 'vendor/shopware/storefront/Resources/app/storefront');
-const HOT_RELOAD_PORT = 9779;
+const inContainer = existsSync('/.dockerenv');
+const args = process.argv.slice(2);
 
-// ── Prep: run sidworks:watch console command via ddev ────────────────────────
+console.warn('SidworksDevTools legacy watch.mjs is deprecated.');
+console.warn('Forwarding to unified watcher: bin/watch-storefront.sh');
 
-const skipPrep = process.argv.includes('--skip-prep');
-
-if (!skipPrep) {
-    console.log('\n  Preparing themes via ddev exec bin/console sidworks:watch --prep-only ...\n');
-    const result = spawnSync('ddev', ['exec', 'bin/console', 'sidworks:watch', '--prep-only'], {
-        cwd: PROJECT_ROOT,
+const child = inContainer
+    ? spawn(resolve(projectRoot, 'bin/watch-storefront.sh'), ['--use-plugin-hot-proxy', ...args], {
         stdio: 'inherit',
+        cwd: projectRoot,
+        shell: true,
+    })
+    : spawn('ddev', ['exec', 'env', 'PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=1', '/var/www/html/bin/watch-storefront.sh', '--use-plugin-hot-proxy', ...args], {
+        stdio: 'inherit',
+        cwd: projectRoot,
     });
-    if (result.status !== 0) {
-        console.error('  \x1b[31m✗\x1b[0m sidworks:watch failed.');
-        process.exit(1);
-    }
-    console.log('');
-}
 
-// ── Load configuration ──────────────────────────────────────────────────────
-
-const watchThemesPath = join(PROJECT_ROOT, 'var/sidworks-watch-themes.json');
-if (!existsSync(watchThemesPath)) {
-    console.error('  \x1b[31m✗\x1b[0m var/sidworks-watch-themes.json not found.');
-    console.error('    Run: ddev exec bin/console sidworks:watch');
-    process.exit(1);
-}
-
-const watchConfig = JSON.parse(readFileSync(watchThemesPath, 'utf-8'));
-const themes = watchConfig.themes;
-
-if (!themes || themes.length === 0) {
-    console.error('  \x1b[31m✗\x1b[0m No themes found in sidworks-watch-themes.json');
-    process.exit(1);
-}
-
-const features = JSON.parse(readFileSync(join(PROJECT_ROOT, 'var/config_js_features.json'), 'utf-8'));
-const plugins = JSON.parse(readFileSync(join(PROJECT_ROOT, 'var/plugins.json'), 'utf-8'));
-
-// ── Console output ──────────────────────────────────────────────────────────
-
-console.log(`\n  SidworksDevTools — Fast SCSS Watcher`);
-console.log(`  ─────────────────────────────────────`);
-console.log(`  Project:    ${PROJECT_ROOT}`);
-console.log(`  Themes:     ${themes.length}`);
-for (const theme of themes) {
-    console.log(`    ${theme.technicalName} (${theme.themeId.substring(0, 8)}...)`);
-    for (const op of theme.outputPaths) {
-        console.log(`      → public/theme/${op.themeHash}/css/all.css`);
-    }
-}
-console.log(`  Hot reload: http://localhost:${HOT_RELOAD_PORT}\n`);
-
-// ── Generate feature flags SCSS map ─────────────────────────────────────────
-
-function generateFeatureFlags() {
-    const entries = Object.entries(features)
-        .map(([key, val]) => `'${key}': ${val}`)
-        .join(',');
-    return `$sw-features: (${entries});`;
-}
-
-// ── Collect plugin style file paths ─────────────────────────────────────────
-
-function collectPluginStyles() {
-    const styles = [];
-    for (const [name, plugin] of Object.entries(plugins)) {
-        if (plugin.storefront?.styleFiles?.length > 0) {
-            for (const styleFile of plugin.storefront.styleFiles) {
-                if (styleFile.includes('@Plugins')) continue;
-                const fullPath = join(PROJECT_ROOT, styleFile);
-                if (existsSync(fullPath)) {
-                    styles.push(fullPath);
-                } else {
-                    console.log(`  \x1b[33m!\x1b[0m Skipping missing: ${styleFile} (${name})`);
-                }
-            }
-        }
-    }
-    return styles;
-}
-
-// ── Map Docker container paths to host paths ────────────────────────────────
-
-function toHostPath(dockerPath) {
-    return dockerPath.replace(/^\/var\/www\/html\//, PROJECT_ROOT + '/');
-}
-
-// ── Generate SCSS entry content for a specific theme ────────────────────────
-
-function generateEntry(theme) {
-    const themeVarsPath = join(PROJECT_ROOT, 'var/theme-variables', `${theme.themeId}.scss`);
-    const coreStyles = theme.style.map(s => toHostPath(s.filepath));
-    const pluginStyles = collectPluginStyles();
-    const firstHash = theme.outputPaths[0]?.themeHash ?? '';
-
-    let entry = '// Auto-generated by SidworksDevTools watch.mjs\n\n';
-    entry += generateFeatureFlags() + '\n\n';
-    entry += `@import "${themeVarsPath}";\n\n`;
-    entry += `$app-css-relative-asset-path: '/theme/${firstHash}/assets';\n`;
-    entry += `$sw-asset-public-url: '';\n`;
-    entry += `$sw-asset-theme-url: '';\n`;
-    entry += `$sw-asset-asset-url: '';\n`;
-    entry += `$sw-asset-sitemap-url: '';\n\n`;
-
-    for (const stylePath of coreStyles) {
-        entry += `@import "${stylePath}";\n`;
-    }
-    for (const stylePath of pluginStyles) {
-        entry += `@import "${stylePath}";\n`;
-    }
-
-    return entry;
-}
-
-// ── Custom sass importer to handle ~ prefix (webpack convention) ────────────
-
-const tildeImporter = {
-    findFileUrl(url) {
-        if (!url.startsWith('~')) return null;
-        const cleanUrl = url.substring(1);
-        const resolved = join(STOREFRONT_APP, cleanUrl);
-
-        const candidates = [
-            resolved + '.scss',
-            resolved + '.css',
-            dirname(resolved) + '/_' + resolved.split('/').pop() + '.scss',
-            resolved + '/_index.scss',
-            resolved + '/index.scss',
-            resolved,
-        ];
-
-        for (const candidate of candidates) {
-            if (existsSync(candidate)) {
-                return new URL('file://' + candidate);
-            }
-        }
-
-        return null;
-    }
-};
-
-// ── Compile SCSS for all themes ─────────────────────────────────────────────
-
-let compileTimeout = null;
-let isCompiling = false;
-let cssVersion = 0;
-
-function compileSCSS() {
-    if (isCompiling) return;
-    isCompiling = true;
-
-    const startTime = performance.now();
-    let allOk = true;
-
-    for (const theme of themes) {
-        const entry = generateEntry(theme);
-
-        try {
-            const result = sass.compileString(entry, {
-                loadPaths: [
-                    join(STOREFRONT_APP, 'src/scss'),
-                    STOREFRONT_APP,
-                ],
-                importers: [tildeImporter],
-                style: 'expanded',
-                sourceMap: false,
-                silenceDeprecations: [
-                    'import',
-                    'slash-div',
-                    'color-functions',
-                    'global-builtin',
-                    'if-function',
-                ],
-            });
-
-            // Write CSS to all output paths for this theme
-            for (const op of theme.outputPaths) {
-                const outputDir = join(PROJECT_ROOT, 'public/theme', op.themeHash, 'css');
-                const outputFile = join(outputDir, 'all.css');
-                mkdirSync(outputDir, { recursive: true });
-                writeFileSync(outputFile, result.css);
-            }
-        } catch (error) {
-            allOk = false;
-            console.error(`  \x1b[31m✗\x1b[0m ${theme.technicalName}: ${error.message.split('\n').join('\n    ')}`);
-        }
-    }
-
-    const elapsed = (performance.now() - startTime).toFixed(0);
-
-    if (allOk) {
-        cssVersion++;
-        const themeCount = themes.length;
-        const pathCount = themes.reduce((n, t) => n + t.outputPaths.length, 0);
-        console.log(`  \x1b[32m✓\x1b[0m Compiled ${themeCount} theme(s) → ${pathCount} output(s) in ${elapsed}ms`);
-        notifyClients('css');
-    } else {
-        console.error(`  \x1b[31m✗\x1b[0m Compilation had errors (${elapsed}ms)`);
-    }
-
-    isCompiling = false;
-}
-
-function debouncedCompile() {
-    if (compileTimeout) clearTimeout(compileTimeout);
-    compileTimeout = setTimeout(compileSCSS, 50);
-}
-
-// ── SSE hot-reload server ───────────────────────────────────────────────────
-
-const clients = new Set();
-
-function notifyClients(type) {
-    for (const client of clients) {
-        client.write(`data: ${JSON.stringify({ type, version: cssVersion })}\n\n`);
-    }
-}
-
-// Send keepalive pings every 30s to prevent idle timeouts
-setInterval(() => {
-    for (const client of clients) {
-        client.write(`: ping\n\n`);
-    }
-}, 30_000);
-
-const CLIENT_SCRIPT = `(function() {
-  var es = new EventSource('http://localhost:${HOT_RELOAD_PORT}/events');
-  es.onmessage = function(e) {
-    var data = JSON.parse(e.data);
-    if (data.type === 'css') {
-      document.querySelectorAll('link[rel="stylesheet"]').forEach(function(link) {
-        if (link.href.indexOf('/theme/') !== -1) {
-          var url = new URL(link.href);
-          url.searchParams.set('_hot', data.version);
-          link.href = url.toString();
-        }
-      });
-    } else if (data.type === 'reload') {
-      location.reload();
-    }
-  };
-  es.onerror = function() { console.log('[hot-reload] reconnecting...'); };
-  console.log('[hot-reload] connected');
-})();`;
-
-const server = createServer((req, res) => {
-    const url = new URL(req.url, `http://localhost:${HOT_RELOAD_PORT}`);
-    res.setHeader('Access-Control-Allow-Origin', '*');
-
-    if (url.pathname === '/events') {
-        res.writeHead(200, {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-        });
-        const client = { write: (data) => res.write(data) };
-        clients.add(client);
-        req.on('close', () => clients.delete(client));
-        return;
-    }
-
-    if (url.pathname === '/client.js') {
-        res.writeHead(200, { 'Content-Type': 'application/javascript' });
-        res.end(CLIENT_SCRIPT);
-        return;
-    }
-
-    if (url.pathname === '/') {
-        let info = `SidworksDevTools — Hot-reload server\n\nThemes:\n`;
-        for (const theme of themes) {
-            info += `  ${theme.technicalName} (${theme.themeId})\n`;
-            for (const op of theme.outputPaths) {
-                info += `    → public/theme/${op.themeHash}/css/all.css\n`;
-            }
-        }
-        res.writeHead(200, { 'Content-Type': 'text/plain' });
-        res.end(info);
-        return;
-    }
-
-    res.writeHead(404);
-    res.end('Not found');
+child.on('exit', (code) => {
+    process.exit(code ?? 0);
 });
 
-server.listen(HOT_RELOAD_PORT);
-
-// ── Initial compilation ─────────────────────────────────────────────────────
-
-console.log('  Building SCSS...');
-compileSCSS();
-
-// ── Watch SCSS files ────────────────────────────────────────────────────────
-
-const watchDirs = [
-    join(PROJECT_ROOT, 'custom/plugins'),
-    join(STOREFRONT_APP, 'src/scss'),
-    join(PROJECT_ROOT, 'var/theme-variables'),
-];
-
-console.log('\n  Watching:');
-for (const dir of watchDirs) {
-    if (!existsSync(dir)) continue;
-    const shortDir = dir.replace(PROJECT_ROOT + '/', '');
-    console.log(`    ${shortDir}`);
-
-    watch(dir, { recursive: true }, (eventType, filename) => {
-        if (!filename) return;
-        if (!filename.endsWith('.scss') && !filename.endsWith('.css')) return;
-        console.log(`  \x1b[33m⟳\x1b[0m ${filename}`);
-        debouncedCompile();
-    });
-}
-
-console.log('\n  Ready. Waiting for changes...\n');
+child.on('error', (error) => {
+    console.error('Unable to start unified storefront watcher:', error.message);
+    process.exit(1);
+});

@@ -72,6 +72,18 @@ function normalizeLoaderRuleEntry(entry) {
     };
 }
 
+function isCssLoader(loaderName) {
+    return loaderName.includes('css-loader') && !loaderName.includes('postcss-loader');
+}
+
+function isPostCssLoader(loaderName) {
+    return loaderName.includes('postcss-loader');
+}
+
+function isSassLoader(loaderName) {
+    return loaderName.includes('sass-loader');
+}
+
 function findScssRule(rules) {
     if (!Array.isArray(rules)) {
         return null;
@@ -115,7 +127,7 @@ function patchScssRule(scssRule, options) {
         const normalized = normalizeLoaderRuleEntry(useEntry);
         const loaderName = typeof normalized?.loader === 'string' ? normalized.loader : '';
 
-        if (options.skipPostCss && loaderName.includes('postcss-loader')) {
+        if (options.skipPostCss && isPostCssLoader(loaderName)) {
             continue;
         }
 
@@ -124,14 +136,14 @@ function patchScssRule(scssRule, options) {
             continue;
         }
 
-        if (loaderName.includes('css-loader')) {
+        if (isCssLoader(loaderName)) {
             normalized.options.sourceMap = options.scssSourceMapEnabled;
             if (typeof normalized.options.url === 'undefined') {
                 normalized.options.url = false;
             }
         }
 
-        if (loaderName.includes('postcss-loader')) {
+        if (isPostCssLoader(loaderName)) {
             normalized.options.sourceMap = options.scssSourceMapEnabled;
             if (!normalized.options.postcssOptions) {
                 normalized.options.postcssOptions = {
@@ -140,7 +152,7 @@ function patchScssRule(scssRule, options) {
             }
         }
 
-        if (loaderName.includes('sass-loader')) {
+        if (isSassLoader(loaderName)) {
             const existingSassOptions = normalized.options.sassOptions || {};
 
             normalized.options.sourceMap = options.scssSourceMapEnabled;

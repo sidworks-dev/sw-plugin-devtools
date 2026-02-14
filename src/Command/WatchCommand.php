@@ -26,7 +26,7 @@ use Symfony\Component\Process\Process;
 
 #[AsCommand(
     name: 'sidworks:watch',
-    description: 'Prepare theme data for the SidworksDevTools SCSS watcher',
+    description: 'Legacy wrapper for the unified storefront watcher',
 )]
 class WatchCommand extends Command
 {
@@ -50,7 +50,7 @@ class WatchCommand extends Command
 
     protected function configure(): void
     {
-        $this->addOption('prep-only', null, InputOption::VALUE_NONE, 'Only run prep (dump + compile), do not start the file watcher');
+        $this->addOption('prep-only', null, InputOption::VALUE_NONE, 'Deprecated: runs only bundle/feature/theme dump commands');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -64,135 +64,28 @@ class WatchCommand extends Command
             return self::FAILURE;
         }
 
-        // Run prerequisite commands
-        $io->section('Running bundle:dump');
-        $application->find('bundle:dump')->run(new ArrayInput([]), $output);
+        if ($input->getOption('prep-only')) {
+            $io->warning('Option "--prep-only" is deprecated and only runs lightweight dumps now.');
+            $application->find('bundle:dump')->run(new ArrayInput([]), $output);
+            $application->find('feature:dump')->run(new ArrayInput([]), $output);
+            $application->find('theme:dump')->run(new ArrayInput([]), $output);
 
-        $io->section('Running feature:dump');
-        $application->find('feature:dump')->run(new ArrayInput([]), $output);
-
-        $io->section('Running theme:compile --active-only');
-        $application->find('theme:compile')->run(
-            new ArrayInput(['--active-only' => true]),
-            $output,
-        );
-
-        // Gather all active themes
-        $io->section('Gathering theme data');
-        $salesChannelToTheme = $this->themeProvider->load($this->context, true);
-
-        // Group sales channels by theme ID
-        /** @var array<string, list<string>> $themeToSalesChannels */
-        $themeToSalesChannels = [];
-        foreach ($salesChannelToTheme as $salesChannelId => $themeId) {
-            $themeToSalesChannels[$themeId][] = $salesChannelId;
+            return self::SUCCESS;
         }
 
-        $themes = [];
+        $io->warning('Command "sidworks:watch" is deprecated. Forwarding to "bin/watch-storefront.sh".');
 
-        foreach ($themeToSalesChannels as $themeId => $salesChannelIds) {
-            $technicalName = $this->getTechnicalName($themeId);
-            if ($technicalName === null) {
-                $io->warning(\sprintf('Could not resolve technical name for theme %s, skipping', $themeId));
+        $pluginRoot = \dirname(__DIR__, 2);
+        $projectRoot = \dirname($pluginRoot, 3);
+        $watchScript = $projectRoot . '/bin/watch-storefront.sh';
 
-                continue;
-            }
-
-            $themeConfig = $this->pluginRegistry->getConfigurations()->getByTechnicalName($technicalName);
-            if ($themeConfig === null) {
-                $io->warning(\sprintf('No config found for theme "%s", skipping', $technicalName));
-
-                continue;
-            }
-
-            // Resolve style files
-            $this->themeFilesystemResolver->getFilesystemForStorefrontConfig($themeConfig);
-            $resolvedFiles = $this->themeFileResolver->resolveFiles(
-                $themeConfig,
-                $this->pluginRegistry->getConfigurations(),
-                true,
-            );
-
-            // Get domain URL from the first sales channel
-            $domainUrl = $this->getDomainUrl($salesChannelIds[0]);
-
-            // Build output paths for each sales channel using this theme
-            $outputPaths = [];
-            foreach ($salesChannelIds as $salesChannelId) {
-                $outputPaths[] = [
-                    'salesChannelId' => $salesChannelId,
-                    'themeHash' => $this->themePathBuilder->assemblePath($salesChannelId, $themeId),
-                ];
-            }
-
-            // Serialize style FileCollection
-            $styleData = [];
-            foreach ($resolvedFiles['style'] as $file) {
-                $styleData[] = [
-                    'filepath' => $file->getFilepath(),
-                    'resolveMapping' => $file->getResolveMapping() ?: (object) [],
-                    'assetName' => $file->assetName,
-                ];
-            }
-
-            $themes[] = [
-                'themeId' => $themeId,
-                'technicalName' => $technicalName,
-                'domainUrl' => $domainUrl ?? '',
-                'style' => $styleData,
-                'outputPaths' => $outputPaths,
-            ];
-
-            $io->writeln(\sprintf(
-                '  Theme <info>%s</info> (%s) → %d sales channel(s)',
-                $technicalName,
-                $themeId,
-                \count($salesChannelIds),
-            ));
-            foreach ($outputPaths as $op) {
-                $io->writeln(\sprintf('    public/theme/<comment>%s</comment>/css/all.css', $op['themeHash']));
-            }
-        }
-
-        if (\count($themes) === 0) {
-            $io->error('No active themes found');
+        if (!is_file($watchScript)) {
+            $io->error(\sprintf('Cannot find watcher script: %s', $watchScript));
 
             return self::FAILURE;
         }
 
-        // Write JSON
-        $data = ['themes' => $themes];
-        $this->staticFileConfigDumper->dumpConfigInVar('sidworks-watch-themes.json', $data);
-
-        $io->success(\sprintf(
-            'Wrote %d theme(s) to var/sidworks-watch-themes.json',
-            \count($themes),
-        ));
-
-        if ($input->getOption('prep-only')) {
-            return self::SUCCESS;
-        }
-
-        // Start the file watcher with --skip-prep (prep is already done)
-        $watchScript = \dirname(__DIR__, 2) . '/bin/watch.mjs';
-
-        // Install node_modules if needed
-        $pluginRoot = \dirname(__DIR__, 2);
-        if (!is_dir($pluginRoot . '/node_modules/sass')) {
-            $io->section('Installing dependencies...');
-            $install = $this->findRuntime() === 'bun'
-                ? new Process(['bun', 'install'], $pluginRoot)
-                : new Process(['npm', 'install'], $pluginRoot);
-            $install->setTimeout(120);
-            $install->run(function (string $type, string $buffer) use ($output): void {
-                $output->write($buffer);
-            });
-        }
-
-        $runtime = $this->findRuntime();
-        $io->section(\sprintf('Starting SCSS watcher via %s...', $runtime));
-
-        $process = new Process([$runtime, $watchScript, '--skip-prep']);
+        $process = new Process([$watchScript, '--use-plugin-hot-proxy'], $projectRoot);
         $process->setTimeout(null);
         $process->setTty(Process::isTtySupported());
         $process->run(function (string $type, string $buffer) use ($output): void {
