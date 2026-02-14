@@ -2,22 +2,8 @@
 
 namespace Sidworks\DevTools\Command;
 
-use Shopware\Core\Defaults;
-use Shopware\Core\Framework\Context;
-use Shopware\Core\Framework\DataAbstractionLayer\EntityRepository;
-use Shopware\Core\Framework\DataAbstractionLayer\Search\Criteria;
-use Shopware\Core\Framework\DataAbstractionLayer\Search\Filter\EqualsFilter;
-use Shopware\Storefront\Theme\AbstractThemePathBuilder;
-use Shopware\Storefront\Theme\ConfigLoader\AbstractAvailableThemeProvider;
-use Shopware\Storefront\Theme\ConfigLoader\StaticFileConfigDumper;
-use Shopware\Storefront\Theme\StorefrontPluginRegistry;
-use Shopware\Storefront\Theme\ThemeCollection;
-use Shopware\Storefront\Theme\ThemeEntity;
-use Shopware\Storefront\Theme\ThemeFileResolver;
-use Shopware\Storefront\Theme\ThemeFilesystemResolver;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
-use Symfony\Component\Console\Input\ArrayInput;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
@@ -26,136 +12,398 @@ use Symfony\Component\Process\Process;
 
 #[AsCommand(
     name: 'sidworks:watch',
-    description: 'Legacy wrapper for the unified storefront watcher',
+    description: 'Optimized storefront watcher without shell wrapper',
 )]
 class WatchCommand extends Command
 {
-    private readonly Context $context;
-
-    /**
-     * @param EntityRepository<ThemeCollection> $themeRepository
-     */
-    public function __construct(
-        private readonly StorefrontPluginRegistry $pluginRegistry,
-        private readonly ThemeFileResolver $themeFileResolver,
-        private readonly EntityRepository $themeRepository,
-        private readonly AbstractAvailableThemeProvider $themeProvider,
-        private readonly ThemeFilesystemResolver $themeFilesystemResolver,
-        private readonly StaticFileConfigDumper $staticFileConfigDumper,
-        private readonly AbstractThemePathBuilder $themePathBuilder,
-    ) {
-        parent::__construct();
-        $this->context = Context::createCLIContext();
-    }
-
     protected function configure(): void
     {
-        $this->addOption('prep-only', null, InputOption::VALUE_NONE, 'Deprecated: runs only bundle/feature/theme dump commands');
+        $this
+            ->addOption('theme-name', null, InputOption::VALUE_REQUIRED, 'Theme name for theme:dump')
+            ->addOption('skip-bundle-dump', null, InputOption::VALUE_NONE, 'Skip "bin/console bundle:dump"')
+            ->addOption('skip-feature-dump', null, InputOption::VALUE_NONE, 'Skip "bin/console feature:dump"')
+            ->addOption('skip-theme-compile', null, InputOption::VALUE_NONE, 'Skip "bin/console theme:compile --active-only"')
+            ->addOption('skip-theme-dump', null, InputOption::VALUE_NONE, 'Skip "bin/console theme:dump"')
+            ->addOption('skip-plugin-install', null, InputOption::VALUE_NONE, 'Skip plugin storefront dependency checks')
+            ->addOption('skip-install', null, InputOption::VALUE_NONE, 'Skip storefront dependency checks')
+            ->addOption('use-bun', null, InputOption::VALUE_NONE, 'Prefer Bun for dependency install')
+            ->addOption('use-npm', null, InputOption::VALUE_NONE, 'Force npm for dependency install')
+            ->addOption('core-only-hot', null, InputOption::VALUE_NONE, 'Compile only core storefront in hot mode')
+            ->addOption('full-twig-watch', null, InputOption::VALUE_NONE, 'Watch broad Twig scope (slower)')
+            ->addOption('js-source-map', null, InputOption::VALUE_NONE, 'Enable JS source maps in hot mode')
+            ->addOption('scss-source-map', null, InputOption::VALUE_NONE, 'Enable SCSS source maps in hot mode')
+            ->addOption('skip-postcss', null, InputOption::VALUE_NONE, 'Skip PostCSS in hot mode')
+            ->addOption('show-sass-deprecations', null, InputOption::VALUE_NONE, 'Show Sass deprecation warnings')
+            ->addOption('no-open-browser', null, InputOption::VALUE_NONE, 'Disable auto-open browser')
+            ->addOption('build-parallelism', null, InputOption::VALUE_REQUIRED, 'Override SHOPWARE_BUILD_PARALLELISM')
+            ->addOption('prep-only', null, InputOption::VALUE_NONE, 'Run prep commands only, do not start watcher');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
         $io = new SymfonyStyle($input, $output);
-        $application = $this->getApplication();
 
-        if ($application === null) {
-            $io->error('No application available');
+        $projectRoot = $this->resolveProjectRoot(__DIR__);
+        $storefrontApp = $this->resolveStorefrontApp($projectRoot);
+        $hotProxyScript = $projectRoot . '/custom/plugins/SidworksDevTools/bin/storefront-hot-proxy/start-hot-reload.js';
+
+        if (!is_dir($storefrontApp)) {
+            $io->error(\sprintf('Storefront app not found: %s', $storefrontApp));
 
             return self::FAILURE;
+        }
+
+        if (!is_file($hotProxyScript)) {
+            $io->error(\sprintf('Hot proxy script not found: %s', $hotProxyScript));
+
+            return self::FAILURE;
+        }
+
+        $nodeBinary = $this->resolveBinary('node');
+        if ($nodeBinary === null) {
+            $io->error('Node.js is required to run sidworks:watch');
+
+            return self::FAILURE;
+        }
+
+        $packageManager = $this->selectPackageManager($input, $io);
+        $hotEnvironment = $this->buildHotEnvironment($input, $projectRoot);
+
+        $io->writeln('Starting optimized storefront watcher');
+        $io->writeln(\sprintf('  Package manager: %s', $packageManager));
+        $io->writeln(\sprintf('  Storefront app: %s', $storefrontApp));
+        $io->writeln(\sprintf('  Hot proxy runtime: %s', $hotProxyScript));
+        $io->writeln(\sprintf('  Core-only hot mode: %s', $hotEnvironment['SHOPWARE_STOREFRONT_HOT_CORE_ONLY']));
+        $io->writeln(\sprintf('  Twig watch mode: %s', $hotEnvironment['SHOPWARE_STOREFRONT_TWIG_WATCH_MODE']));
+        $io->writeln(\sprintf('  Build parallelism: %s', $hotEnvironment['SHOPWARE_BUILD_PARALLELISM']));
+        $io->writeln(\sprintf('  JS source maps: %s', $hotEnvironment['SHOPWARE_STOREFRONT_JS_SOURCE_MAP']));
+        $io->writeln(\sprintf('  SCSS source maps: %s', $hotEnvironment['SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP']));
+        $io->writeln(\sprintf('  Skip PostCSS: %s', $hotEnvironment['SHOPWARE_STOREFRONT_SKIP_POSTCSS']));
+        $io->writeln(\sprintf('  Use sass-embedded: %s', $hotEnvironment['SHOPWARE_STOREFRONT_USE_SASS_EMBEDDED']));
+
+        if (!$input->getOption('skip-install') && !is_dir($storefrontApp . '/node_modules/webpack-dev-server')) {
+            $io->writeln('Installing storefront dependencies');
+            $installExitCode = $this->runPackageInstall($packageManager, $storefrontApp, $projectRoot, $output, $input);
+            if ($installExitCode !== 0) {
+                return $installExitCode;
+            }
+        }
+
+        $prepExitCode = $this->runPrepCommands($input, $output, $projectRoot);
+        if ($prepExitCode !== 0) {
+            return $prepExitCode;
         }
 
         if ($input->getOption('prep-only')) {
-            $io->warning('Option "--prep-only" is deprecated and only runs lightweight dumps now.');
-            $application->find('bundle:dump')->run(new ArrayInput([]), $output);
-            $application->find('feature:dump')->run(new ArrayInput([]), $output);
-            $application->find('theme:dump')->run(new ArrayInput([]), $output);
-
             return self::SUCCESS;
         }
 
-        $io->warning('Command "sidworks:watch" is deprecated. Forwarding to "bin/watch-storefront.sh".');
-
-        $pluginRoot = \dirname(__DIR__, 2);
-        $projectRoot = \dirname($pluginRoot, 3);
-        $watchScript = $projectRoot . '/bin/watch-storefront.sh';
-
-        if (!is_file($watchScript)) {
-            $io->error(\sprintf('Cannot find watcher script: %s', $watchScript));
-
-            return self::FAILURE;
+        if (!$input->getOption('skip-plugin-install')) {
+            $pluginInstallExitCode = $this->installPluginStorefrontDependencies($packageManager, $projectRoot, $output, $input, $io);
+            if ($pluginInstallExitCode !== 0) {
+                return $pluginInstallExitCode;
+            }
         }
 
-        $process = new Process([$watchScript, '--use-plugin-hot-proxy'], $projectRoot);
+        $watchProcess = new Process([$nodeBinary, $hotProxyScript], $projectRoot, $hotEnvironment, null, null);
+        return $this->runProcess($watchProcess, $output, $input);
+    }
+
+    private function runPrepCommands(InputInterface $input, OutputInterface $output, string $projectRoot): int
+    {
+        if (!$input->getOption('skip-bundle-dump')) {
+            $exitCode = $this->runConsoleCommand(['bundle:dump'], $projectRoot, $output, $input);
+            if ($exitCode !== 0) {
+                return $exitCode;
+            }
+        }
+
+        if (!$input->getOption('skip-feature-dump')) {
+            $exitCode = $this->runConsoleCommand(['feature:dump'], $projectRoot, $output, $input);
+            if ($exitCode !== 0) {
+                return $exitCode;
+            }
+        }
+
+        if (!$input->getOption('skip-theme-compile')) {
+            $exitCode = $this->runConsoleCommand(['theme:compile', '--active-only'], $projectRoot, $output, $input);
+            if ($exitCode !== 0) {
+                return $exitCode;
+            }
+        }
+
+        if (!$input->getOption('skip-theme-dump')) {
+            $command = ['theme:dump'];
+            $themeName = $input->getOption('theme-name');
+            if (\is_string($themeName) && $themeName !== '') {
+                $command[] = '--theme-name=' . $themeName;
+            }
+
+            return $this->runConsoleCommand($command, $projectRoot, $output, $input);
+        }
+
+        return 0;
+    }
+
+    private function runConsoleCommand(array $arguments, string $projectRoot, OutputInterface $output, InputInterface $input): int
+    {
+        $process = new Process([PHP_BINARY, $projectRoot . '/bin/console', ...$arguments], $projectRoot, null, null, null);
+        return $this->runProcess($process, $output, $input);
+    }
+
+    private function runPackageInstall(
+        string $packageManager,
+        string $path,
+        string $projectRoot,
+        OutputInterface $output,
+        InputInterface $input
+    ): int {
+        $command = $packageManager === 'bun'
+            ? ['bun', 'install', '--cwd', $path]
+            : ['npm', 'install', '--prefix', $path, '--prefer-offline', '--no-audit', '--fund=false'];
+
+        $process = new Process($command, $projectRoot, null, null, null);
+
+        return $this->runProcess($process, $output, $input);
+    }
+
+    private function installPluginStorefrontDependencies(
+        string $packageManager,
+        string $projectRoot,
+        OutputInterface $output,
+        InputInterface $input,
+        SymfonyStyle $io
+    ): int {
+        $pluginsPath = $projectRoot . '/var/plugins.json';
+        if (!is_file($pluginsPath)) {
+            return 0;
+        }
+
+        $content = file_get_contents($pluginsPath);
+        if ($content === false) {
+            return 0;
+        }
+
+        $configs = json_decode($content, true);
+        if (!\is_array($configs)) {
+            return 0;
+        }
+
+        foreach ($configs as $config) {
+            if (!\is_array($config)) {
+                continue;
+            }
+
+            $technicalName = \is_string($config['technicalName'] ?? null) ? $config['technicalName'] : '';
+            if ($technicalName === '' || $technicalName === 'storefront') {
+                continue;
+            }
+
+            $storefrontPath = \is_string($config['storefront']['path'] ?? null) ? $config['storefront']['path'] : '';
+            if ($storefrontPath === '') {
+                continue;
+            }
+
+            $basePath = \is_string($config['basePath'] ?? null) ? $config['basePath'] : '';
+            $sourcePath = $this->resolvePath($projectRoot, $basePath . $storefrontPath);
+            $packagePath = \dirname($sourcePath);
+
+            if (!is_file($packagePath . '/package.json') || is_dir($packagePath . '/node_modules')) {
+                continue;
+            }
+
+            $skipVariable = 'SKIP_' . strtoupper(str_replace('-', '_', $technicalName));
+            $skipVariableValue = getenv($skipVariable);
+            if ($skipVariableValue !== false && $skipVariableValue !== '') {
+                continue;
+            }
+
+            $io->writeln(\sprintf('Installing dependencies for %s', $technicalName));
+            $exitCode = $this->runPackageInstall($packageManager, $packagePath, $projectRoot, $output, $input);
+            if ($exitCode !== 0) {
+                return $exitCode;
+            }
+        }
+
+        return 0;
+    }
+
+    private function runProcess(Process $process, OutputInterface $output, InputInterface $input): int
+    {
         $process->setTimeout(null);
-        $process->setTty(Process::isTtySupported());
-        $process->run(function (string $type, string $buffer) use ($output): void {
+
+        if ($input->isInteractive() && Process::isTtySupported()) {
+            $process->setTty(true);
+            $process->run();
+
+            return $process->getExitCode() ?? 0;
+        }
+
+        $process->run(static function (string $type, string $buffer) use ($output): void {
             $output->write($buffer);
         });
 
-        return $process->getExitCode() ?? self::SUCCESS;
+        return $process->getExitCode() ?? 0;
     }
 
-    private function getTechnicalName(string $themeId): ?string
+    private function selectPackageManager(InputInterface $input, SymfonyStyle $io): string
     {
-        $technicalName = null;
-
-        do {
-            $theme = $this->themeRepository->search(new Criteria([$themeId]), $this->context)->getEntities()->first();
-            if (!$theme instanceof ThemeEntity) {
-                break;
-            }
-
-            $technicalName = $theme->getTechnicalName();
-            $parentThemeId = $theme->getParentThemeId();
-            if ($parentThemeId !== null) {
-                $themeId = $parentThemeId;
-            }
-        } while ($technicalName === null && $parentThemeId !== null);
-
-        return $technicalName;
-    }
-
-    private function findRuntime(): string
-    {
-        foreach (['bun', 'node'] as $bin) {
-            $check = new Process(['which', $bin]);
-            $check->run();
-            if ($check->isSuccessful()) {
-                return $bin;
-            }
+        if ($input->getOption('use-npm')) {
+            return 'npm';
         }
 
-        throw new \RuntimeException('Neither bun nor node found. Install one of them to run the SCSS watcher.');
+        $preferBun = $input->getOption('use-bun');
+        if (!$preferBun) {
+            $preferBun = $this->env('SHOPWARE_STOREFRONT_WATCH_PM', '') === 'bun';
+        }
+
+        if ($preferBun) {
+            if ($this->resolveBinary('bun') !== null) {
+                return 'bun';
+            }
+
+            $io->warning('Requested Bun but it is not available. Falling back to npm.');
+        }
+
+        return 'npm';
     }
 
-    private function getDomainUrl(string $salesChannelId): ?string
+    private function buildHotEnvironment(InputInterface $input, string $projectRoot): array
     {
-        $result = $this->themeRepository->search(
-            (new Criteria())
-                ->addFilter(new EqualsFilter('salesChannels.id', $salesChannelId))
-                ->addAssociation('salesChannels.domains'),
-            $this->context,
-        )->getEntities()->first();
+        $buildParallelism = $this->env('SHOPWARE_BUILD_PARALLELISM', '');
+        if ($buildParallelism === '') {
+            $buildParallelism = (string) max(1, $this->detectCpuCount() - 1);
+        }
 
-        if (!$result instanceof ThemeEntity) {
+        $overrideParallelism = $input->getOption('build-parallelism');
+        if (\is_string($overrideParallelism) && ctype_digit($overrideParallelism) && (int) $overrideParallelism > 0) {
+            $buildParallelism = $overrideParallelism;
+        }
+
+        $twigWatchMode = $input->getOption('full-twig-watch')
+            ? 'full'
+            : $this->env('SHOPWARE_STOREFRONT_TWIG_WATCH_MODE', 'narrow');
+
+        $environment = [
+            'PROJECT_ROOT' => $projectRoot,
+            'NODE_ENV' => $this->env('NODE_ENV', 'development'),
+            'MODE' => $this->env('MODE', 'hot'),
+            'NPM_CONFIG_FUND' => 'false',
+            'NPM_CONFIG_AUDIT' => 'false',
+            'NPM_CONFIG_UPDATE_NOTIFIER' => 'false',
+            'SHOPWARE_BUILD_PARALLELISM' => $buildParallelism,
+            'SHOPWARE_STOREFRONT_DEV_CACHE' => $this->env('SHOPWARE_STOREFRONT_DEV_CACHE', '1'),
+            'SHOPWARE_STOREFRONT_USE_SASS_EMBEDDED' => $this->env('SHOPWARE_STOREFRONT_USE_SASS_EMBEDDED', '1'),
+            'SHOPWARE_STOREFRONT_HOT_CORE_ONLY' => $input->getOption('core-only-hot')
+                ? '1'
+                : $this->env('SHOPWARE_STOREFRONT_HOT_CORE_ONLY', '0'),
+            'SHOPWARE_STOREFRONT_TWIG_WATCH_MODE' => $twigWatchMode,
+            'SHOPWARE_STOREFRONT_JS_SOURCE_MAP' => $input->getOption('js-source-map')
+                ? '1'
+                : $this->env('SHOPWARE_STOREFRONT_JS_SOURCE_MAP', '0'),
+            'SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP' => $input->getOption('scss-source-map')
+                ? '1'
+                : $this->env('SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP', '0'),
+            'SHOPWARE_STOREFRONT_SKIP_POSTCSS' => $input->getOption('skip-postcss')
+                ? '1'
+                : $this->env('SHOPWARE_STOREFRONT_SKIP_POSTCSS', '0'),
+            'SHOPWARE_STOREFRONT_SASS_SILENCE_DEPRECATIONS' => $input->getOption('show-sass-deprecations')
+                ? '0'
+                : $this->env('SHOPWARE_STOREFRONT_SASS_SILENCE_DEPRECATIONS', '1'),
+            'SHOPWARE_STOREFRONT_OPEN_BROWSER' => $input->getOption('no-open-browser')
+                ? '0'
+                : $this->env('SHOPWARE_STOREFRONT_OPEN_BROWSER', '0'),
+        ];
+
+        if ($twigWatchMode === 'narrow') {
+            $environment['SHOPWARE_STOREFRONT_SKIP_EXTENSION_TWIG_WATCH'] = '1';
+        }
+
+        return $environment;
+    }
+
+    private function detectCpuCount(): int
+    {
+        $cpuInfoPath = '/proc/cpuinfo';
+        if (!is_file($cpuInfoPath)) {
+            return 2;
+        }
+
+        $contents = file_get_contents($cpuInfoPath);
+        if ($contents === false) {
+            return 2;
+        }
+
+        preg_match_all('/^processor\s*:/m', $contents, $matches);
+        $count = \is_array($matches[0] ?? null) ? \count($matches[0]) : 0;
+
+        return $count > 0 ? $count : 2;
+    }
+
+    private function resolveStorefrontApp(string $projectRoot): string
+    {
+        $platformStorefrontApp = $projectRoot . '/vendor/shopware/platform/src/Storefront/Resources/app/storefront';
+        if (is_dir($platformStorefrontApp)) {
+            return $platformStorefrontApp;
+        }
+
+        return $projectRoot . '/vendor/shopware/storefront/Resources/app/storefront';
+    }
+
+    private function resolveProjectRoot(string $startDirectory): string
+    {
+        $directory = $startDirectory;
+        $rootDirectory = \dirname($directory);
+
+        while ($directory !== $rootDirectory) {
+            if (is_dir($directory . '/vendor/shopware') && is_dir($directory . '/var')) {
+                return $directory;
+            }
+
+            $directory = $rootDirectory;
+            $rootDirectory = \dirname($directory);
+        }
+
+        throw new \RuntimeException('Could not resolve project root for sidworks:watch');
+    }
+
+    private function resolveBinary(string $binary): ?string
+    {
+        $pathValue = getenv('PATH');
+        if ($pathValue === false || $pathValue === '') {
             return null;
         }
 
-        $salesChannels = $result->getSalesChannels()?->filterByTypeId(Defaults::SALES_CHANNEL_TYPE_STOREFRONT);
-        if ($salesChannels === null) {
-            return null;
-        }
-
-        foreach ($salesChannels as $sc) {
-            if ($sc->getId() !== $salesChannelId) {
-                continue;
-            }
-            $domains = $sc->getDomains();
-            if ($domains !== null && $domains->count() > 0) {
-                return $domains->first()?->getUrl();
+        foreach (explode(PATH_SEPARATOR, $pathValue) as $directory) {
+            $candidate = rtrim($directory, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $binary;
+            if (is_file($candidate) && is_executable($candidate)) {
+                return $candidate;
             }
         }
 
         return null;
+    }
+
+    private function resolvePath(string $projectRoot, string $path): string
+    {
+        if ($path === '') {
+            return $projectRoot;
+        }
+
+        if ($path[0] === DIRECTORY_SEPARATOR || preg_match('/^[A-Za-z]:\\\\/', $path) === 1) {
+            return $path;
+        }
+
+        return $projectRoot . '/' . ltrim($path, '/');
+    }
+
+    private function env(string $key, string $default): string
+    {
+        $value = getenv($key);
+        if ($value === false || $value === '') {
+            return $default;
+        }
+
+        return (string) $value;
     }
 }

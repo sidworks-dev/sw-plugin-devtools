@@ -20,18 +20,19 @@ Never hunt for a Twig file again. Sidworks DevTools reveals the exact template a
 - **Intelligent Line Search**: Automatically finds the precise element line by searching for classes, IDs, and tags
 - **Multi-Editor Support**: Works with PHPStorm and VSCode
 
-### Fast SCSS Watcher with Hot Reload
-- **Instant SCSS compilation**: Uses Bun + dart-sass for ~500ms builds (vs minutes with webpack)
-- **CSS Hot Reload**: Changes apply instantly without page refresh via SSE (Server-Sent Events)
-- **Auto-detected config**: Reads Shopware's theme config, plugin styles, and feature flags automatically
-- **Zero proxy setup**: No BrowserSync or proxy needed — just a lightweight reload server on port 9779
+### Optimized Storefront Watcher
+- **Single command flow**: Use `bin/console sidworks:watch` (no shell wrapper required)
+- **Fast hot mode defaults**: Narrow Twig watch scope, filesystem cache, source maps off by default
+- **`sass-embedded` enabled**: Uses embedded Sass compiler in hot mode (falls back to `sass` if unavailable)
+- **Core hot-proxy override**: Keeps hot runtime customizations in plugin space instead of `vendor/shopware/*`
 
 ## Requirements
 
 - Shopware 6.6.x or 6.7.x
 - PHP 8.1 or higher
 - Chrome or Edge browser (for extension)
-- [Bun](https://bun.sh) runtime (for SCSS watcher)
+- Node.js 20+ (required for storefront watcher)
+- [Bun](https://bun.sh) optional (only if you choose `--use-bun`)
 
 ## Installation
 
@@ -94,21 +95,25 @@ The plugin will automatically inject this path into the page, so you don't need 
 
 ## Usage
 
-### SCSS Watcher
+### Storefront Watcher (`sidworks:watch`)
 
-Run from your project root (on the host, not inside DDEV):
+Run from your project root:
 
 ```bash
-custom/plugins/SidworksDevTools/bin/watch.sh
+bin/console sidworks:watch
 ```
 
-This will:
-1. Install the `sass` dependency (first run only)
-2. Dump theme config and compile the theme once
-3. Start watching for SCSS changes in `custom/plugins/`, storefront SCSS, and theme variables
-4. Launch an SSE server on `http://localhost:9779` for hot reload
+Fast profile example:
 
-The plugin's Twig template automatically injects the hot-reload client script, so CSS changes apply instantly without refreshing the page.
+```bash
+bin/console sidworks:watch --core-only-hot --skip-postcss --skip-plugin-install --no-open-browser
+```
+
+This command:
+1. Runs storefront prep commands (`bundle:dump`, `feature:dump`, `theme:*`) unless skipped
+2. Ensures storefront dependencies exist
+3. Starts the plugin hot-proxy runtime directly (no `watch.sh`/`watch.mjs` wrapper)
+4. Uses `sass-embedded` by default via `SHOPWARE_STOREFRONT_USE_SASS_EMBEDDED=1`
 
 ### Storefront Hot Proxy Override
 

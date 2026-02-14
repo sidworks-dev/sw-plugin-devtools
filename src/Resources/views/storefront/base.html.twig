@@ -1,9 +1,0 @@
-{% sw_extends '@Storefront/storefront/base.html.twig' %}
-
-{% block base_body_script %}
-    {{ parent() }}
-
-    {# Hot-reload client — connects to bin/watch-fast.mjs SSE server #}
-    {# Remove or disable this plugin in production #}
-    <script src="http://localhost:9779/client.js"></script>
-{% endblock %}
