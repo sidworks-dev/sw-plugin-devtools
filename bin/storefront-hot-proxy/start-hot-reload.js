@@ -8,6 +8,7 @@ const { spawn } = require('node:child_process');
 
 const createLiveReloadServer = require('./live-reload-server');
 const { createScssSidecar } = require('./scss-sidecar');
+const { createChangeFeedbackWatcher } = require('./change-feedback-watcher');
 const {
     resolveProjectRoot,
     createStorefrontRequire,
@@ -25,6 +26,7 @@ const proxyPort = Number(process.env.STOREFRONT_PROXY_PORT) || 9998;
 const assetPort = Number(process.env.STOREFRONT_ASSETS_PORT) || 9999;
 const shouldOpenBrowser = process.env.SHOPWARE_STOREFRONT_OPEN_BROWSER !== '0';
 const scssEngine = String(process.env.SHOPWARE_STOREFRONT_SCSS_ENGINE || 'webpack').toLowerCase();
+const disableScss = process.env.SHOPWARE_STOREFRONT_DISABLE_SCSS === '1';
 const noOp = () => {};
 
 const themeFilesConfigPath = path.resolve(projectRootPath, 'var/theme-files.json');
@@ -98,9 +100,13 @@ const baseProxyOptions = {
 };
 
 let scssSidecar = null;
-if (scssEngine === 'sass-cli') {
+if (!disableScss && scssEngine === 'sass-cli') {
     scssSidecar = createScssSidecar(projectRootPath);
+} else if (disableScss) {
+    console.log('[SidworksDevTools] SCSS sidecar disabled (--no-scss)');
 }
+
+const changeFeedbackWatcher = createChangeFeedbackWatcher(projectRootPath);
 
 function onProxyReq(proxyReq, req) {
     const requestUrl = req.url || '';
@@ -272,15 +278,26 @@ if (scssSidecar) {
     });
 }
 
+if (changeFeedbackWatcher.start()) {
+    console.log('[SidworksDevTools] JS/Twig change feedback watcher active');
+}
+
 function closeScssSidecar() {
     if (scssSidecar) {
         scssSidecar.close();
     }
 }
 
+function closeChangeFeedbackWatcher() {
+    changeFeedbackWatcher.close();
+}
+
 process.on('SIGINT', closeScssSidecar);
 process.on('SIGTERM', closeScssSidecar);
 process.on('exit', closeScssSidecar);
+process.on('SIGINT', closeChangeFeedbackWatcher);
+process.on('SIGTERM', closeChangeFeedbackWatcher);
+process.on('exit', closeChangeFeedbackWatcher);
 
 function isDocumentRequest(req) {
     const secFetchDest = (req.headers['sec-fetch-dest'] || req.headers['Sec-Fetch-Dest'] || '').toLowerCase();

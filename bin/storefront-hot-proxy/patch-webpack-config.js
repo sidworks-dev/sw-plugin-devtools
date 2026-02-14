@@ -233,12 +233,15 @@ function loadPatchedWebpackConfig(explicitProjectRoot) {
     const scssSourceMapEnabled = asBoolean(process.env.SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP, false);
     const skipPostCss = asBoolean(process.env.SHOPWARE_STOREFRONT_SKIP_POSTCSS, false);
     const silenceSassDeprecations = asBoolean(process.env.SHOPWARE_STOREFRONT_SASS_SILENCE_DEPRECATIONS, true);
-    const coreOnlyHotMode = asBoolean(process.env.SHOPWARE_STOREFRONT_HOT_CORE_ONLY, false);
+    const disableJs = asBoolean(process.env.SHOPWARE_STOREFRONT_DISABLE_JS, false);
+    const disableTwig = asBoolean(process.env.SHOPWARE_STOREFRONT_DISABLE_TWIG, false);
+    const disableScss = asBoolean(process.env.SHOPWARE_STOREFRONT_DISABLE_SCSS, false);
+    const coreOnlyHotMode = asBoolean(process.env.SHOPWARE_STOREFRONT_HOT_CORE_ONLY, false) || disableJs;
     const scssEngine = asString(process.env.SHOPWARE_STOREFRONT_SCSS_ENGINE, 'webpack').toLowerCase();
-    const useScssSidecar = scssEngine === 'sass-cli';
+    const useScssSidecar = !disableScss && scssEngine === 'sass-cli';
     const twigWatchMode = asString(process.env.SHOPWARE_STOREFRONT_TWIG_WATCH_MODE, 'narrow').toLowerCase();
 
-    if (twigWatchMode === 'narrow') {
+    if (twigWatchMode === 'narrow' || disableTwig) {
         process.env.SHOPWARE_STOREFRONT_SKIP_EXTENSION_TWIG_WATCH = '1';
     }
 
@@ -291,6 +294,25 @@ function loadPatchedWebpackConfig(explicitProjectRoot) {
         coreConfig.entry.storefront = path.resolve(storefrontApp, 'src/main.js');
     }
 
+    if (disableScss && coreConfig.entry && Object.prototype.hasOwnProperty.call(coreConfig.entry, 'hot-reloading')) {
+        delete coreConfig.entry['hot-reloading'];
+        console.log('[SidworksDevTools] SCSS compilation disabled (--no-scss)');
+    }
+
+    if (disableJs) {
+        const emptyEntryPath = path.resolve(__dirname, 'empty-entry.js');
+        const nextEntry = {
+            storefront: emptyEntryPath,
+        };
+
+        if (!disableScss && !useScssSidecar && coreConfig.entry && coreConfig.entry['hot-reloading']) {
+            nextEntry['hot-reloading'] = coreConfig.entry['hot-reloading'];
+        }
+
+        coreConfig.entry = nextEntry;
+        console.log('[SidworksDevTools] JS compilation disabled (--no-js)');
+    }
+
     if (useScssSidecar) {
         const webpackLib = storefrontRequire('webpack');
         coreConfig.plugins = coreConfig.plugins || [];
@@ -298,6 +320,11 @@ function loadPatchedWebpackConfig(explicitProjectRoot) {
             new webpackLib.NormalModuleReplacementPlugin(/theme-entry\.scss$/, path.resolve(__dirname, 'empty-theme-entry.js')),
         );
         console.log('[SidworksDevTools] SCSS sidecar mode enabled (theme-entry.scss removed from webpack)');
+    }
+
+    if (disableTwig && coreConfig.devServer) {
+        coreConfig.devServer.watchFiles = false;
+        console.log('[SidworksDevTools] Twig watch disabled (--no-twig)');
     }
 
     const assetPort = parseInt(process.env.STOREFRONT_ASSETS_PORT || '', 10) || 9999;
@@ -326,10 +353,12 @@ function loadPatchedWebpackConfig(explicitProjectRoot) {
         };
     }
 
-    patchWatchFiles(coreConfig, {
-        projectRoot,
-        twigWatchMode,
-    });
+    if (!disableTwig) {
+        patchWatchFiles(coreConfig, {
+            projectRoot,
+            twigWatchMode,
+        });
+    }
 
     if (!useScssSidecar) {
         const scssRule = findScssRule(coreConfig?.module?.rules);

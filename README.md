@@ -32,7 +32,7 @@ Never hunt for a Twig file again. Sidworks DevTools reveals the exact template a
 - PHP 8.1 or higher
 - Chrome or Edge browser (for extension)
 - Node.js 20+ (required for storefront watcher)
-- [Bun](https://bun.sh) optional (only if you choose `--use-bun`)
+- [Bun](https://bun.sh) optional (set `SHOPWARE_STOREFRONT_WATCH_PM=bun` to use it)
 
 ## Installation
 
@@ -103,29 +103,23 @@ Run from your project root:
 bin/console sidworks:watch
 ```
 
-Fast profile example:
-
-```bash
-bin/console sidworks:watch --fast --no-open-browser
-```
+Defaults:
+- Fast profile is always on
+- Browser auto-open is off by default
 
 This command:
-1. Runs storefront prep commands (`bundle:dump`, `feature:dump`, `theme:*`) unless skipped
+1. Runs in fast mode by default (`skip-postcss`, `scss-engine=sass-cli`)
 2. Ensures storefront dependencies exist
-3. Auto-installs `sass-embedded` in the storefront app when missing (unless disabled)
+3. Auto-installs `sass-embedded` in the storefront app when missing
 4. Starts the plugin hot-proxy runtime directly (no `watch.sh`/`watch.mjs` wrapper)
 5. Uses `sass-embedded` by default via `SHOPWARE_STOREFRONT_USE_SASS_EMBEDDED=1`
 
-Disable auto install if needed:
+Only runtime toggles:
 
 ```bash
-bin/console sidworks:watch --skip-sass-embedded-install
-```
-
-or via environment variable:
-
-```bash
-SHOPWARE_STOREFRONT_AUTO_INSTALL_SASS_EMBEDDED=0
+bin/console sidworks:watch --no-js
+bin/console sidworks:watch --no-twig
+bin/console sidworks:watch --no-scss
 ```
 
 ### Storefront Hot Proxy Override

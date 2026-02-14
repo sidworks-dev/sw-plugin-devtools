@@ -153,7 +153,118 @@ function createScssSidecar(projectRoot) {
         aliasMap: {},
         activeEntryPath: null,
         loggedGeneratedEntryInfo: false,
+        spinnerInterval: null,
+        spinnerFrame: 0,
+        spinnerReason: '',
+        spinnerStartedAt: 0,
+        pendingChangedFiles: new Set(),
+        pendingTriggerType: '',
     };
+
+    function hasInteractiveTty() {
+        return Boolean(process.stdout && process.stdout.isTTY);
+    }
+
+    function startCompileIndicator(reason) {
+        if (!hasInteractiveTty()) {
+            console.log(`[SidworksDevTools] SCSS sidecar compiling (${reason})...`);
+            return;
+        }
+
+        if (state.spinnerInterval) {
+            return;
+        }
+
+        const frames = ['-', '\\', '|', '/'];
+        state.spinnerReason = reason;
+        state.spinnerFrame = 0;
+        state.spinnerStartedAt = Date.now();
+        state.spinnerInterval = setInterval(() => {
+            const frame = frames[state.spinnerFrame % frames.length];
+            state.spinnerFrame += 1;
+            const elapsed = Date.now() - state.spinnerStartedAt;
+            process.stdout.write(`\r[SidworksDevTools] SCSS sidecar compiling (${state.spinnerReason}) ${frame} ${elapsed}ms`);
+        }, 120);
+    }
+
+    function stopCompileIndicator(success, reason, duration, errorMessage) {
+        if (state.spinnerInterval) {
+            clearInterval(state.spinnerInterval);
+            state.spinnerInterval = null;
+        }
+
+        if (hasInteractiveTty()) {
+            process.stdout.write('\r\x1b[2K');
+        }
+
+        if (success) {
+            console.log(`[SidworksDevTools] SCSS sidecar compiled (${reason}) in ${duration}ms`);
+            return;
+        }
+
+        console.error(`[SidworksDevTools] SCSS sidecar compile failed (${reason}) after ${duration}ms: ${errorMessage}`);
+    }
+
+    function formatChangedFilePath(filePath) {
+        if (typeof filePath !== 'string' || filePath.trim() === '') {
+            return '';
+        }
+
+        const absoluteRoot = path.resolve(rootPath);
+        const absoluteFile = path.resolve(filePath);
+        if (absoluteFile.startsWith(absoluteRoot + path.sep)) {
+            return path.relative(absoluteRoot, absoluteFile).replace(/\\/g, '/');
+        }
+
+        return filePath.replace(/\\/g, '/');
+    }
+
+    function summarizeChangedFiles(files) {
+        if (!Array.isArray(files) || files.length === 0) {
+            return '';
+        }
+
+        const normalizedFiles = files
+            .map(formatChangedFilePath)
+            .filter((item) => item !== '');
+
+        if (normalizedFiles.length === 0) {
+            return '';
+        }
+
+        if (normalizedFiles.length === 1) {
+            return normalizedFiles[0];
+        }
+
+        if (normalizedFiles.length <= 3) {
+            return normalizedFiles.join(', ');
+        }
+
+        return `${normalizedFiles.slice(0, 3).join(', ')} +${normalizedFiles.length - 3} more`;
+    }
+
+    function rememberPendingTrigger(triggerType, changedFile) {
+        if (typeof triggerType === 'string' && triggerType !== '') {
+            state.pendingTriggerType = triggerType;
+        }
+
+        const normalizedPath = formatChangedFilePath(changedFile);
+        if (normalizedPath !== '') {
+            state.pendingChangedFiles.add(normalizedPath);
+        }
+    }
+
+    function consumePendingTrigger(fallbackType) {
+        const reason = state.pendingTriggerType || fallbackType || 'change';
+        const changedFiles = [...state.pendingChangedFiles];
+        state.pendingTriggerType = '';
+        state.pendingChangedFiles.clear();
+
+        return {
+            reason,
+            changedFiles,
+        };
+    }
 
     function resolveSassImplementation() {
         try {
@@ -347,14 +458,17 @@ function createScssSidecar(projectRoot) {
         return null;
     }
 
-    function scheduleCompile() {
+    function scheduleCompile(triggerType = 'change', changedFile = '') {
+        rememberPendingTrigger(triggerType, changedFile);
+
         if (state.compileTimer) {
             clearTimeout(state.compileTimer);
         }
 
         state.compileTimer = setTimeout(() => {
             state.compileTimer = null;
-            compileAndWatch('change');
+            const trigger = consumePendingTrigger(triggerType);
+            compileAndWatch(trigger.reason, trigger.changedFiles);
         }, 80);
     }
 
@@ -374,8 +488,8 @@ function createScssSidecar(projectRoot) {
             ],
         });
 
-        state.watchpack.on('change', scheduleCompile);
-        state.watchpack.on('remove', scheduleCompile);
+        state.watchpack.on('change', (filePath) => scheduleCompile('change', filePath));
+        state.watchpack.on('remove', (filePath) => scheduleCompile('remove', filePath));
 
         return state.watchpack;
     }
@@ -408,18 +522,34 @@ function createScssSidecar(projectRoot) {
         }
     }
 
-    async function compileAndWatch(reason) {
+    async function compileAndWatch(reason, changedFiles = []) {
         if (!state.sassImplementation) {
             state.sassImplementation = resolveSassImplementation();
         }
 
+        const fileSummary = summarizeChangedFiles(changedFiles);
+        const reasonLabel = fileSummary ? `${reason}: ${fileSummary}` : reason;
+
         if (state.compileInFlight) {
+            for (const changedFile of changedFiles) {
+                rememberPendingTrigger(reason, changedFile);
+            }
+
+            if (!state.compileQueued) {
+                const queuedFiles = summarizeChangedFiles([...state.pendingChangedFiles]);
+                console.log(
+                    queuedFiles
+                        ? `[SidworksDevTools] SCSS sidecar change queued while compile is running (${queuedFiles})`
+                        : '[SidworksDevTools] SCSS sidecar change queued while compile is running',
+                );
+            }
             state.compileQueued = true;
             return;
         }
 
         state.compileInFlight = true;
         const startedAt = Date.now();
+        startCompileIndicator(reasonLabel);
 
         try {
             const compileEntryPath = resolveCompileEntryPath();
@@ -437,16 +567,16 @@ function createScssSidecar(projectRoot) {
             state.version = Date.now();
             updateWatchSet(result.loadedFiles, compileEntryPath);
             broadcastCssUpdate();
-            console.log(`[SidworksDevTools] SCSS sidecar compiled (${reason}) in ${Date.now() - startedAt}ms`);
+            stopCompileIndicator(true, reasonLabel, Date.now() - startedAt, '');
         } catch (error) {
             const errorMessage = error?.message || String(error);
-            console.error(`[SidworksDevTools] SCSS sidecar compile failed (${reason}): ${errorMessage}`);
+            stopCompileIndicator(false, reasonLabel, Date.now() - startedAt, errorMessage);
         } finally {
             state.compileInFlight = false;
 
             if (state.compileQueued) {
                 state.compileQueued = false;
-                scheduleCompile();
+                scheduleCompile(state.pendingTriggerType || 'change');
             }
         }
     }
@@ -601,6 +731,11 @@ function createScssSidecar(projectRoot) {
     }
 
     function close() {
+        if (state.spinnerInterval) {
+            clearInterval(state.spinnerInterval);
+            state.spinnerInterval = null;
+        }
+
         if (state.compileTimer) {
             clearTimeout(state.compileTimer);
             state.compileTimer = null;

@@ -19,27 +19,9 @@ class WatchCommand extends Command
     protected function configure(): void
     {
         $this
-            ->addOption('theme-name', null, InputOption::VALUE_REQUIRED, 'Theme name for theme:dump')
-            ->addOption('skip-bundle-dump', null, InputOption::VALUE_NONE, 'Skip "bin/console bundle:dump"')
-            ->addOption('skip-feature-dump', null, InputOption::VALUE_NONE, 'Skip "bin/console feature:dump"')
-            ->addOption('skip-theme-compile', null, InputOption::VALUE_NONE, 'Skip "bin/console theme:compile --active-only"')
-            ->addOption('skip-theme-dump', null, InputOption::VALUE_NONE, 'Skip "bin/console theme:dump"')
-            ->addOption('skip-plugin-install', null, InputOption::VALUE_NONE, 'Skip plugin storefront dependency checks')
-            ->addOption('skip-install', null, InputOption::VALUE_NONE, 'Skip storefront dependency checks')
-            ->addOption('use-bun', null, InputOption::VALUE_NONE, 'Prefer Bun for dependency install')
-            ->addOption('use-npm', null, InputOption::VALUE_NONE, 'Force npm for dependency install')
-            ->addOption('core-only-hot', null, InputOption::VALUE_NONE, 'Compile only core storefront in hot mode')
-            ->addOption('full-twig-watch', null, InputOption::VALUE_NONE, 'Watch broad Twig scope (slower)')
-            ->addOption('js-source-map', null, InputOption::VALUE_NONE, 'Enable JS source maps in hot mode')
-            ->addOption('scss-source-map', null, InputOption::VALUE_NONE, 'Enable SCSS source maps in hot mode')
-            ->addOption('skip-postcss', null, InputOption::VALUE_NONE, 'Skip PostCSS in hot mode')
-            ->addOption('show-sass-deprecations', null, InputOption::VALUE_NONE, 'Show Sass deprecation warnings')
-            ->addOption('fast', null, InputOption::VALUE_NONE, 'Fast preset (core-only-hot, skip-postcss, skip prep-heavy steps)')
-            ->addOption('scss-engine', null, InputOption::VALUE_REQUIRED, 'SCSS engine: webpack|sass-cli')
-            ->addOption('skip-sass-embedded-install', null, InputOption::VALUE_NONE, 'Do not auto-install sass-embedded when missing')
-            ->addOption('no-open-browser', null, InputOption::VALUE_NONE, 'Disable auto-open browser')
-            ->addOption('build-parallelism', null, InputOption::VALUE_REQUIRED, 'Override SHOPWARE_BUILD_PARALLELISM')
-            ->addOption('prep-only', null, InputOption::VALUE_NONE, 'Run prep commands only, do not start watcher');
+            ->addOption('no-js', null, InputOption::VALUE_NONE, 'Disable JS compilation (core + plugins)')
+            ->addOption('no-twig', null, InputOption::VALUE_NONE, 'Disable Twig watch/live reload feedback')
+            ->addOption('no-scss', null, InputOption::VALUE_NONE, 'Disable SCSS compilation');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -75,25 +57,47 @@ class WatchCommand extends Command
             return self::FAILURE;
         }
 
-        $packageManager = $this->selectPackageManager($input, $io);
-        $fastProfile = (bool) $input->getOption('fast');
-        $scssEngine = $this->resolveScssEngine($input, $fastProfile);
+        $packageManager = $this->selectPackageManager($io);
+        $fastProfile = true;
+        $disableJs = (bool) $input->getOption('no-js');
+        $disableTwig = (bool) $input->getOption('no-twig');
+        $disableScss = (bool) $input->getOption('no-scss');
+        $openBrowser = false;
+        $scssEngine = $this->resolveScssEngine();
 
         if (!\in_array($scssEngine, ['webpack', 'sass-cli'], true)) {
-            $io->error('Invalid --scss-engine value. Use "webpack" or "sass-cli".');
+            $io->error('Invalid SHOPWARE_STOREFRONT_SCSS_ENGINE value. Use "webpack" or "sass-cli".');
 
             return self::FAILURE;
         }
 
-        $hotEnvironment = $this->buildHotEnvironment($input, $projectRoot, $fastProfile, $scssEngine);
+        $hotEnvironment = $this->buildHotEnvironment(
+            $projectRoot,
+            $fastProfile,
+            $scssEngine,
+            $disableJs,
+            $disableTwig,
+            $disableScss,
+            $openBrowser
+        );
 
-        $this->renderStartupOverview($io, $projectRoot, $packageManager, $storefrontApp, $hotProxyScript, $hotEnvironment, $fastProfile, $scssEngine);
+        $this->renderStartupOverview(
+            $io,
+            $projectRoot,
+            $packageManager,
+            $storefrontApp,
+            $hotProxyScript,
+            $hotEnvironment,
+            $fastProfile,
+            $scssEngine,
+            $disableJs,
+            $disableTwig,
+            $disableScss
+        );
 
-        if ($fastProfile) {
-            $io->note('Fast profile enabled: core-only-hot + skip-postcss + scss-engine=sass-cli + skip prep-heavy commands.');
-        }
+        $io->note('Fast profile is the default: skip-postcss + scss-engine=sass-cli + no-open-browser.');
 
-        if (!$input->getOption('skip-install') && !is_dir($storefrontApp . '/node_modules/webpack-dev-server')) {
+        if (!is_dir($storefrontApp . '/node_modules/webpack-dev-server')) {
             $io->writeln('Installing storefront dependencies');
             $installExitCode = $this->runPackageInstall($packageManager, $storefrontApp, $projectRoot, $output, $input);
             if ($installExitCode !== 0) {
@@ -102,30 +106,23 @@ class WatchCommand extends Command
         }
 
         $autoInstallSassEmbedded = $this->shouldAutoInstallSassEmbedded(
-            $input,
-            ($hotEnvironment['SHOPWARE_STOREFRONT_USE_SASS_EMBEDDED'] ?? '1') === '1'
+            ($hotEnvironment['SHOPWARE_STOREFRONT_USE_SASS_EMBEDDED'] ?? '1') === '1',
+            $disableScss
         );
-        if ($autoInstallSassEmbedded && $input->getOption('skip-install') && !$this->hasSassEmbedded($storefrontApp)) {
-            $io->note('skip-install is enabled and sass-embedded is missing. SCSS will fallback to sass (slower).');
-        }
 
-        if (!$input->getOption('skip-install') && $autoInstallSassEmbedded) {
+        if ($autoInstallSassEmbedded) {
             $sassEmbeddedExitCode = $this->ensureSassEmbedded($packageManager, $storefrontApp, $projectRoot, $output, $input, $io);
             if ($sassEmbeddedExitCode !== 0) {
                 $io->warning('sass-embedded installation failed. Watcher continues with sass fallback (slower SCSS builds).');
             }
         }
 
-        $prepExitCode = $this->runPrepCommands($input, $output, $projectRoot, $fastProfile);
+        $prepExitCode = $this->runPrepCommands($output, $projectRoot);
         if ($prepExitCode !== 0) {
             return $prepExitCode;
         }
 
-        if ($input->getOption('prep-only')) {
-            return self::SUCCESS;
-        }
-
-        if (!$input->getOption('skip-plugin-install') && !$fastProfile) {
+        if (!$disableJs) {
             $pluginInstallExitCode = $this->installPluginStorefrontDependencies($packageManager, $projectRoot, $output, $input, $io);
             if ($pluginInstallExitCode !== 0) {
                 return $pluginInstallExitCode;
@@ -137,46 +134,13 @@ class WatchCommand extends Command
     }
 
     private function runPrepCommands(
-        InputInterface $input,
         OutputInterface $output,
-        string $projectRoot,
-        bool $fastProfile
+        string $projectRoot
     ): int
     {
-        $skipBundleDump = (bool) $input->getOption('skip-bundle-dump') || $fastProfile;
-        $skipFeatureDump = (bool) $input->getOption('skip-feature-dump') || $fastProfile;
-        $skipThemeCompile = (bool) $input->getOption('skip-theme-compile') || $fastProfile;
-        $skipThemeDump = (bool) $input->getOption('skip-theme-dump') || ($fastProfile && is_file($projectRoot . '/var/theme-files.json'));
-
-        if (!$skipBundleDump) {
-            $exitCode = $this->runConsoleCommand(['bundle:dump'], $projectRoot, $output, $input);
-            if ($exitCode !== 0) {
-                return $exitCode;
-            }
-        }
-
-        if (!$skipFeatureDump) {
-            $exitCode = $this->runConsoleCommand(['feature:dump'], $projectRoot, $output, $input);
-            if ($exitCode !== 0) {
-                return $exitCode;
-            }
-        }
-
-        if (!$skipThemeCompile) {
-            $exitCode = $this->runConsoleCommand(['theme:compile', '--active-only'], $projectRoot, $output, $input);
-            if ($exitCode !== 0) {
-                return $exitCode;
-            }
-        }
-
+        $skipThemeDump = is_file($projectRoot . '/var/theme-files.json');
         if (!$skipThemeDump) {
-            $command = ['theme:dump'];
-            $themeName = $input->getOption('theme-name');
-            if (\is_string($themeName) && $themeName !== '') {
-                $command[] = '--theme-name=' . $themeName;
-            }
-
-            return $this->runConsoleCommand($command, $projectRoot, $output, $input);
+            return $this->runConsoleCommand(['theme:dump'], $projectRoot, $output);
         }
 
         return 0;
@@ -190,7 +154,10 @@ class WatchCommand extends Command
         string $hotProxyScript,
         array $hotEnvironment,
         bool $fastProfile,
-        string $scssEngine
+        string $scssEngine,
+        bool $disableJs,
+        bool $disableTwig,
+        bool $disableScss
     ): void {
         $io->title('Sidworks Storefront Watcher');
         $io->section('Runtime');
@@ -204,6 +171,9 @@ class WatchCommand extends Command
         $io->definitionList(
             ['Core-only hot mode' => $this->yesNo($hotEnvironment['SHOPWARE_STOREFRONT_HOT_CORE_ONLY'])],
             ['Fast preset' => $this->yesNo($fastProfile ? '1' : '0')],
+            ['Disable JS' => $disableJs ? '<comment>yes</comment>' : '<info>no</info>'],
+            ['Disable Twig' => $disableTwig ? '<comment>yes</comment>' : '<info>no</info>'],
+            ['Disable SCSS' => $disableScss ? '<comment>yes</comment>' : '<info>no</info>'],
             ['SCSS engine' => \sprintf('<info>%s</info>', $scssEngine)],
             ['Auto-install sass-embedded' => $this->yesNo($hotEnvironment['SHOPWARE_STOREFRONT_AUTO_INSTALL_SASS_EMBEDDED'])],
             ['Twig watch mode' => \sprintf('<info>%s</info>', $hotEnvironment['SHOPWARE_STOREFRONT_TWIG_WATCH_MODE'])],
@@ -212,17 +182,18 @@ class WatchCommand extends Command
             ['SCSS source maps' => $this->yesNo($hotEnvironment['SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP'])],
             ['Skip PostCSS' => $this->yesNo($hotEnvironment['SHOPWARE_STOREFRONT_SKIP_POSTCSS'])],
             ['Use sass-embedded' => $this->yesNo($hotEnvironment['SHOPWARE_STOREFRONT_USE_SASS_EMBEDDED'])],
+            ['Auto-open browser' => $this->yesNo($hotEnvironment['SHOPWARE_STOREFRONT_OPEN_BROWSER'])],
         );
     }
 
-    private function runConsoleCommand(array $arguments, string $projectRoot, OutputInterface $output, InputInterface $input): int
+    private function runConsoleCommand(array $arguments, string $projectRoot, OutputInterface $output): int
     {
         if (!\in_array('--no-interaction', $arguments, true) && !\in_array('-n', $arguments, true)) {
             $arguments[] = '--no-interaction';
         }
 
         $process = new Process([PHP_BINARY, $projectRoot . '/bin/console', ...$arguments], $projectRoot, null, null, null);
-        return $this->runProcess($process, $output, $input);
+        return $this->runProcessWithoutInput($process, $output);
     }
 
     private function runPackageInstall(
@@ -349,16 +320,20 @@ class WatchCommand extends Command
         return $process->getExitCode() ?? 0;
     }
 
-    private function selectPackageManager(InputInterface $input, SymfonyStyle $io): string
+    private function runProcessWithoutInput(Process $process, OutputInterface $output): int
     {
-        if ($input->getOption('use-npm')) {
-            return 'npm';
-        }
+        $process->setTimeout(null);
 
-        $preferBun = $input->getOption('use-bun');
-        if (!$preferBun) {
-            $preferBun = $this->env('SHOPWARE_STOREFRONT_WATCH_PM', '') === 'bun';
-        }
+        $process->run(static function (string $type, string $buffer) use ($output): void {
+            $output->write($buffer);
+        });
+
+        return $process->getExitCode() ?? 0;
+    }
+
+    private function selectPackageManager(SymfonyStyle $io): string
+    {
+        $preferBun = $this->env('SHOPWARE_STOREFRONT_WATCH_PM', '') === 'bun';
 
         if ($preferBun) {
             if ($this->resolveBinary('bun') !== null) {
@@ -371,21 +346,24 @@ class WatchCommand extends Command
         return 'npm';
     }
 
-    private function buildHotEnvironment(InputInterface $input, string $projectRoot, bool $fastProfile, string $scssEngine): array
+    private function buildHotEnvironment(
+        string $projectRoot,
+        bool $fastProfile,
+        string $scssEngine,
+        bool $disableJs,
+        bool $disableTwig,
+        bool $disableScss,
+        bool $openBrowser
+    ): array
     {
         $buildParallelism = $this->env('SHOPWARE_BUILD_PARALLELISM', '');
         if ($buildParallelism === '') {
             $buildParallelism = (string) max(1, $this->detectCpuCount() - 1);
         }
 
-        $overrideParallelism = $input->getOption('build-parallelism');
-        if (\is_string($overrideParallelism) && ctype_digit($overrideParallelism) && (int) $overrideParallelism > 0) {
-            $buildParallelism = $overrideParallelism;
-        }
-
-        $twigWatchMode = $input->getOption('full-twig-watch')
-            ? 'full'
-            : $this->env('SHOPWARE_STOREFRONT_TWIG_WATCH_MODE', 'narrow');
+        $twigWatchMode = $disableTwig
+            ? 'off'
+            : 'narrow';
 
         $useSassEmbedded = $this->env('SHOPWARE_STOREFRONT_USE_SASS_EMBEDDED', '1');
 
@@ -399,43 +377,34 @@ class WatchCommand extends Command
             'SHOPWARE_BUILD_PARALLELISM' => $buildParallelism,
             'SHOPWARE_STOREFRONT_DEV_CACHE' => $this->env('SHOPWARE_STOREFRONT_DEV_CACHE', '1'),
             'SHOPWARE_STOREFRONT_USE_SASS_EMBEDDED' => $useSassEmbedded,
-            'SHOPWARE_STOREFRONT_HOT_CORE_ONLY' => ($input->getOption('core-only-hot') || $fastProfile)
-                ? '1'
-                : $this->env('SHOPWARE_STOREFRONT_HOT_CORE_ONLY', '0'),
+            'SHOPWARE_STOREFRONT_HOT_CORE_ONLY' => $disableJs ? '1' : '0',
             'SHOPWARE_STOREFRONT_TWIG_WATCH_MODE' => $twigWatchMode,
-            'SHOPWARE_STOREFRONT_JS_SOURCE_MAP' => $input->getOption('js-source-map')
-                ? '1'
-                : $this->env('SHOPWARE_STOREFRONT_JS_SOURCE_MAP', '0'),
-            'SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP' => $input->getOption('scss-source-map')
-                ? '1'
-                : $this->env('SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP', '0'),
+            'SHOPWARE_STOREFRONT_JS_SOURCE_MAP' => '0',
+            'SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP' => '0',
             'SHOPWARE_STOREFRONT_SCSS_ENGINE' => $scssEngine,
-            'SHOPWARE_STOREFRONT_SKIP_POSTCSS' => ($input->getOption('skip-postcss') || $fastProfile)
-                ? '1'
-                : $this->env('SHOPWARE_STOREFRONT_SKIP_POSTCSS', '0'),
-            'SHOPWARE_STOREFRONT_SASS_SILENCE_DEPRECATIONS' => $input->getOption('show-sass-deprecations')
-                ? '0'
-                : $this->env('SHOPWARE_STOREFRONT_SASS_SILENCE_DEPRECATIONS', '1'),
-            'SHOPWARE_STOREFRONT_OPEN_BROWSER' => $input->getOption('no-open-browser')
-                ? '0'
-                : $this->env('SHOPWARE_STOREFRONT_OPEN_BROWSER', '0'),
+            'SHOPWARE_STOREFRONT_SKIP_POSTCSS' => '1',
+            'SHOPWARE_STOREFRONT_SASS_SILENCE_DEPRECATIONS' => '1',
+            'SHOPWARE_STOREFRONT_OPEN_BROWSER' => $openBrowser ? '1' : '0',
+            'SHOPWARE_STOREFRONT_DISABLE_JS' => $disableJs ? '1' : '0',
+            'SHOPWARE_STOREFRONT_DISABLE_TWIG' => $disableTwig ? '1' : '0',
+            'SHOPWARE_STOREFRONT_DISABLE_SCSS' => $disableScss ? '1' : '0',
         ];
 
         $environment['SHOPWARE_STOREFRONT_AUTO_INSTALL_SASS_EMBEDDED'] = $this->shouldAutoInstallSassEmbedded(
-            $input,
-            $useSassEmbedded === '1'
+            $useSassEmbedded === '1',
+            $disableScss
         ) ? '1' : '0';
 
-        if ($twigWatchMode === 'narrow') {
+        if ($twigWatchMode === 'narrow' || $twigWatchMode === 'off') {
             $environment['SHOPWARE_STOREFRONT_SKIP_EXTENSION_TWIG_WATCH'] = '1';
         }
 
         return $environment;
     }
 
-    private function shouldAutoInstallSassEmbedded(InputInterface $input, bool $useSassEmbeddedEnabled): bool
+    private function shouldAutoInstallSassEmbedded(bool $useSassEmbeddedEnabled, bool $disableScss): bool
     {
-        if ($input->getOption('skip-sass-embedded-install')) {
+        if ($disableScss) {
             return false;
         }
 
@@ -563,19 +532,14 @@ class WatchCommand extends Command
         return (string) $value;
     }
 
-    private function resolveScssEngine(InputInterface $input, bool $fastProfile): string
+    private function resolveScssEngine(): string
     {
-        $explicitOption = $input->getOption('scss-engine');
-        if (\is_string($explicitOption) && $explicitOption !== '') {
-            return strtolower($explicitOption);
-        }
-
         $envValue = strtolower($this->env('SHOPWARE_STOREFRONT_SCSS_ENGINE', ''));
         if ($envValue !== '') {
             return $envValue;
         }
 
-        return $fastProfile ? 'sass-cli' : 'webpack';
+        return 'sass-cli';
     }
 
     private function yesNo(string $value): string
