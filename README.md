@@ -1,6 +1,6 @@
 # Sidworks DevTools for Shopware 6
 
-Never hunt for a Twig file again. Sidworks DevTools reveals the exact template and block behind every Shopware 6 element and lets you jump straight into your IDE with a single click.
+Never hunt for a Twig file again. Sidworks DevTools reveals the exact template and block behind every Shopware 6 element and lets you jump straight into your IDE with a single click. It also includes a optimised storefront watcher.
 
 ![Screenshot](./docs/sw-devtools.png)
 
@@ -20,11 +20,19 @@ Never hunt for a Twig file again. Sidworks DevTools reveals the exact template a
 - **Intelligent Line Search**: Automatically finds the precise element line by searching for classes, IDs, and tags
 - **Multi-Editor Support**: Works with PHPStorm and VSCode
 
+### Optimized Storefront Watcher
+- **One command start**: `bin/console sidworks:watch-storefront`
+- **Theme picker by default**: Choose theme + domain directly in the terminal
+- **Fast feedback**: Live SCSS updates with readable JS/Twig/SCSS logs
+- **Simple toggles**: `--no-js`, `--no-twig`, `--no-scss`
+
 ## Requirements
 
 - Shopware 6.6.x or 6.7.x
 - PHP 8.1 or higher
 - Chrome or Edge browser (for extension)
+- Node.js 20+ (required for storefront watcher)
+- [Bun](https://bun.sh) optional (set `SHOPWARE_STOREFRONT_WATCH_PM=bun` to use it)
 
 ## Installation
 
@@ -87,7 +95,38 @@ The plugin will automatically inject this path into the page, so you don't need 
 
 ## Usage
 
-### Basic Workflow
+### Storefront Watcher (`sidworks:watch-storefront`)
+
+Run from your project root:
+
+```bash
+bin/console sidworks:watch-storefront
+```
+
+What this gives you:
+- Interactive theme/domain selection by default
+- Fast defaults for day-to-day storefront work
+- Clear terminal output with `[SCSS]`, `[TWIG]`, and `[JS]` log tags
+
+Common toggles:
+
+```bash
+bin/console sidworks:watch-storefront --no-js
+bin/console sidworks:watch-storefront --no-twig
+bin/console sidworks:watch-storefront --no-scss
+```
+
+Theme selection shortcuts:
+
+```bash
+bin/console sidworks:watch-storefront --theme-name=QsoTheme
+bin/console sidworks:watch-storefront --theme-id=018e94f67ba2719da036725041793f30 --domain-url=https://carclean.ddev.site/nl
+bin/console sidworks:watch-storefront --pick-theme
+```
+
+`--domain-url` requires `--theme-id` (or use `--pick-theme` for interactive theme + domain selection).
+
+### Template Inspector — Basic Workflow
 
 1. **Enable debug mode** in Shopware (`.env`: `APP_ENV=dev`)
 2. **Install both** the plugin and [Chrome extension](https://github.com/sidworks-dev/sw-plugin-devtools-chrome-extension)

@@ -1,0 +1,415 @@
+/* eslint no-console: 0 */
+
+const nodeServerHttp = require('node:http');
+const nodeServerHttps = require('node:https');
+const fs = require('node:fs');
+const path = require('node:path');
+const { spawn } = require('node:child_process');
+
+const createLiveReloadServer = require('./live-reload-server');
+const { createScssSidecar } = require('./scss-sidecar');
+const { createChangeFeedbackWatcher } = require('./change-feedback-watcher');
+const {
+    resolveProjectRoot,
+    createStorefrontRequire,
+} = require('./runtime-paths');
+
+const projectRootPath = resolveProjectRoot(__dirname);
+const storefrontRequire = createStorefrontRequire(projectRootPath);
+const { createProxyMiddleware } = storefrontRequire('http-proxy-middleware');
+
+// Match core `npm run hot-proxy` behavior.
+process.env.NODE_ENV = process.env.NODE_ENV || 'development';
+process.env.MODE = process.env.MODE || 'hot';
+
+const proxyPort = Number(process.env.STOREFRONT_PROXY_PORT) || 9998;
+const assetPort = Number(process.env.STOREFRONT_ASSETS_PORT) || 9999;
+const shouldOpenBrowser = process.env.SHOPWARE_STOREFRONT_OPEN_BROWSER !== '0';
+const scssEngine = String(process.env.SHOPWARE_STOREFRONT_SCSS_ENGINE || 'webpack').toLowerCase();
+const disableScss = process.env.SHOPWARE_STOREFRONT_DISABLE_SCSS === '1';
+const noOp = () => {};
+const ANSI = {
+    reset: '\x1b[0m',
+    green: '\x1b[32m',
+    yellow: '\x1b[33m',
+    cyan: '\x1b[36m',
+};
+
+function hasInteractiveTty() {
+    return Boolean(process.stdout && process.stdout.isTTY);
+}
+
+function colorize(text, colorCode) {
+    if (!hasInteractiveTty()) {
+        return text;
+    }
+
+    return `${colorCode}${text}${ANSI.reset}`;
+}
+
+function tag(label, colorCode = ANSI.cyan) {
+    return colorize(`[${label}]`, colorCode);
+}
+
+const themeFilesConfigPath = path.resolve(projectRootPath, 'var/theme-files.json');
+let themeFiles = {};
+if (fs.existsSync(themeFilesConfigPath)) {
+    try {
+        // eslint-disable-next-line global-require, import/no-dynamic-require
+        themeFiles = require(themeFilesConfigPath);
+    } catch (error) {
+        console.warn('[SidworksDevTools] Unable to read var/theme-files.json:', error.message);
+    }
+}
+
+const appUrlFromThemeFiles = parseUrlOrNull(typeof themeFiles.domainUrl === 'string' ? themeFiles.domainUrl.trim() : '');
+const appUrlFromEnv = parseUrlOrNull(process.env.APP_URL || '');
+
+if (!appUrlFromThemeFiles && appUrlFromEnv) {
+    console.log('[SidworksDevTools] theme-files domainUrl is empty/invalid. Falling back to APP_URL.');
+}
+
+const appUrlEnv = appUrlFromThemeFiles
+    ? new URL(`${appUrlFromThemeFiles.protocol}//${appUrlFromThemeFiles.host}`)
+    : (appUrlFromEnv || new URL('http://localhost'));
+
+if (!appUrlFromThemeFiles && !appUrlFromEnv) {
+    console.warn('[SidworksDevTools] APP_URL is missing/invalid. Falling back to http://localhost.');
+}
+
+const caRoot = process.env.CAROOT || '';
+const keyPath = process.env.STOREFRONT_HTTPS_KEY_FILE || (caRoot ? `${caRoot}/${appUrlEnv.hostname}-key.pem` : '');
+const certPath = process.env.STOREFRONT_HTTPS_CERTIFICATE_FILE || (caRoot ? `${caRoot}/${appUrlEnv.hostname}.pem` : '');
+const skipSslCerts = process.env.STOREFRONT_SKIP_SSL_CERT === 'true';
+const sslFilesFound = keyPath !== '' && certPath !== '' && fs.existsSync(keyPath) && fs.existsSync(certPath);
+
+const proxyProtocol = (appUrlEnv.protocol === 'https:' && sslFilesFound || skipSslCerts) ? 'https:' : 'http:';
+const proxyUrlFromEnv = parseUrlOrNull(process.env.PROXY_URL || '');
+if (!proxyUrlFromEnv && process.env.PROXY_URL) {
+    console.warn('[SidworksDevTools] PROXY_URL is invalid. Falling back to generated proxy URL.');
+}
+const proxyUrlEnv = proxyUrlFromEnv || new URL(`${proxyProtocol}//${appUrlEnv.hostname}:${proxyPort}`);
+
+const appOriginWithSlashPattern = new RegExp(`${escapeRegExp(`${appUrlEnv.origin}/`)}`, 'g');
+const proxyMediaPattern = new RegExp(`${escapeRegExp(`${proxyUrlEnv.origin}/media/`)}`, 'g');
+const proxyThumbnailPattern = new RegExp(`${escapeRegExp(`${proxyUrlEnv.origin}/thumbnail/`)}`, 'g');
+const lineItemRedirectPattern = /content="0;url='\/checkout\/offcanvas'"/g;
+const profilerPattern = /http[s]?\\u003A\\\/\\\/[\w.]*(:\d*|\\u003A\d*)?\\\/_wdt/gm;
+const xdebugIgnorePattern = /new\s*URL\(url\);\s*url\.searchParams\.set\('XDEBUG_IGNORE'/gm;
+const hotProxyPathPattern = /\/_webpack_hot_proxy_\//g;
+
+const baseProxyOptions = {
+    appPort: Number(appUrlEnv.port) || undefined,
+    host: appUrlEnv.host,
+    proxyHost: proxyUrlEnv.host,
+    proxyPort: proxyPort,
+    secure: appUrlEnv.protocol === 'https:' && sslFilesFound && !skipSslCerts,
+    target: appUrlEnv.origin,
+    autoRewrite: true,
+    followRedirects: false,
+    changeOrigin: true,
+    headers: {
+        host: appUrlEnv.host,
+        'hot-reload-mode': 'true',
+        'accept-encoding': 'identity',
+    },
+    cookieDomainRewrite: {
+        '*': '',
+    },
+    cookiePathRewrite: {
+        '*': '',
+    },
+};
+
+let scssSidecar = null;
+if (!disableScss && scssEngine === 'sass-cli') {
+    scssSidecar = createScssSidecar(projectRootPath);
+} else if (disableScss) {
+    console.log('[SidworksDevTools] SCSS sidecar disabled (--no-scss)');
+}
+
+const changeFeedbackWatcher = createChangeFeedbackWatcher(projectRootPath);
+
+function onProxyReq(proxyReq, req) {
+    const requestUrl = req.url || '';
+
+    if (requestUrl.indexOf('/sockjs-node/') === 0 || requestUrl.indexOf('hot-update.json') !== -1 || requestUrl.indexOf('hot-update.js') !== -1) {
+        proxyReq.host = '127.0.0.1';
+        proxyReq.port = assetPort;
+    }
+}
+
+function onProxyError(err, req, res) {
+    console.error(err);
+
+    if (err.code === 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY') {
+        console.error('Make sure that node.js trusts the provided certificate. Set NODE_EXTRA_CA_CERTS for this.');
+        console.error(`Try to start again with NODE_EXTRA_CA_CERTS="${certPath}" set.`);
+        process.exit(1);
+    }
+
+    if (err.code === 'SSL_ERROR_NO_CYPHER_OVERLAP') {
+        console.error('Try to start watcher again with specific path to https (key and crt) files like this:');
+        console.error('STOREFRONT_HTTPS_KEY_FILE=/var/www/html/.../certs/shopware.key STOREFRONT_HTTPS_CERTIFICATE_FILE=/var/www/html/../certs/shopware.crt composer run watch:storefront');
+        process.exit(1);
+    }
+
+    if (err.code === 'ENOTFOUND') {
+        console.error('The domain could not be resolved. Make sure that the domain is correct in DEVENV/DDEV.');
+        console.error('And if this is a custom domain, make sure that the domain is set in your /etc/hosts file.');
+        process.exit(1);
+    }
+
+    res.writeHead(500, {
+        'Content-Type': 'text/plain',
+    });
+    res.end('Something went wrong. Check the console for more information.');
+}
+
+const passthroughProxy = createProxyMiddleware({
+    ...baseProxyOptions,
+    selfHandleResponse: false,
+    on: {
+        proxyReq: onProxyReq,
+        error: onProxyError,
+    },
+});
+
+const rewriteProxy = createProxyMiddleware({
+    ...baseProxyOptions,
+    selfHandleResponse: true,
+    on: {
+        proxyReq: onProxyReq,
+        proxyRes: (proxyRes, req, res) => {
+            const requestUrl = req.url || '';
+
+            applyProxyHeaders(proxyRes, res);
+
+            if (requestUrl.indexOf('.svg') !== -1) {
+                res.setHeader('Content-Type', 'image/svg+xml');
+            }
+
+            const chunks = [];
+            proxyRes.on('data', (chunk) => {
+                chunks.push(chunk);
+            });
+            proxyRes.on('end', () => {
+                let body = Buffer.concat(chunks).toString();
+
+                if (isLineItemRequest(requestUrl)) {
+                    body = body.replace(lineItemRedirectPattern, 'content="0;url=\'?offcanvas=1\'"');
+                    res.removeHeader('content-length');
+                    res.end(body);
+                    return;
+                }
+
+                if (requestUrl.indexOf('offcanvas=1') !== -1) {
+                    body = body.concat(openOffCanvasScript());
+                }
+
+                body = body
+                    .replace(hotProxyPathPattern, `${proxyUrlEnv.protocol}//${proxyUrlEnv.hostname}:${assetPort}/`)
+                    .replace(appOriginWithSlashPattern, `${proxyUrlEnv.origin}/`)
+                    .replace(proxyMediaPattern, `${appUrlEnv.origin}/media/`)
+                    .replace(proxyThumbnailPattern, `${appUrlEnv.origin}/thumbnail/`)
+                    .replace(profilerPattern, '/_wdt')
+                    .replace(xdebugIgnorePattern, 'new URL(window.location.protocol+\'//\'+window.location.host+url);                url.searchParams.set(\'XDEBUG_IGNORE\'');
+
+                if (scssSidecar && isDocumentRequest(req)) {
+                    body = scssSidecar.injectMarkup(body, proxyUrlEnv.origin);
+                }
+
+                res.removeHeader('content-length');
+                res.end(body);
+            });
+        },
+        error: onProxyError,
+    },
+});
+
+const proxy = (req, res) => {
+    if (scssSidecar && scssSidecar.handleInternalRequest(req, res)) {
+        return;
+    }
+
+    if (requiresResponseRewrite(req)) {
+        rewriteProxy(req, res, noOp);
+        return;
+    }
+
+    passthroughProxy(req, res, noOp);
+};
+
+if (appUrlEnv.protocol === 'https:' && !sslFilesFound) {
+    console.error('Could not find the key and certificate files.');
+    console.error('Make sure that the environment variables STOREFRONT_HTTPS_KEY_FILE and STOREFRONT_HTTPS_CERTIFICATE_FILE are set correctly.');
+    console.error('If you use a TLS proxy (like in DDEV Shopware 6 setup), you can ignore this message.');
+}
+
+const sslOptions = proxyUrlEnv.protocol === 'https:' && skipSslCerts === false ? {
+    key: fs.readFileSync(keyPath),
+    cert: fs.readFileSync(certPath),
+} : {};
+
+const server = createLiveReloadServer(sslOptions).catch((e) => {
+    console.error(e);
+    console.error('Could not start the live server with the provided certificate files, falling back to http server.');
+    return createLiveReloadServer({});
+});
+
+server.then(() => {
+    console.log(`[SidworksDevTools] ${tag('URL')} storefront: ${colorize(appUrlEnv.origin, ANSI.green)}`);
+    console.log(`[SidworksDevTools] ${tag('URL')} hot proxy: ${colorize(proxyUrlEnv.origin, ANSI.green)}`);
+
+    if (proxyUrlEnv.protocol === 'https:' && skipSslCerts === false) {
+        try {
+            const httpsServer = nodeServerHttps.createServer(sslOptions, proxy);
+            listenProxyServer(httpsServer, 'https');
+        } catch (e) {
+            console.error(e);
+            console.error('Could not start the proxy server with the provided certificate files, falling back to http server.');
+            proxyUrlEnv.protocol = 'http:';
+        }
+    }
+
+    if (proxyUrlEnv.protocol === 'http:' || skipSslCerts === true) {
+        const httpServer = nodeServerHttp.createServer(proxy);
+        listenProxyServer(httpServer, 'http', skipSslCerts);
+    }
+
+    console.log('');
+
+    if (shouldOpenBrowser) {
+        openBrowserWithUrl(`${proxyUrlEnv.origin}`);
+        return;
+    }
+
+    console.log(`[SidworksDevTools] ${tag('OPEN', ANSI.yellow)} auto-open disabled. Open manually: ${proxyUrlEnv.origin}`);
+});
+
+if (scssSidecar) {
+    scssSidecar.start().then((started) => {
+        if (started) {
+            console.log('[SidworksDevTools] SCSS sidecar active (sass-cli mode)');
+        }
+    }).catch((error) => {
+        console.error('[SidworksDevTools] Failed to start SCSS sidecar:', error.message);
+    });
+}
+
+if (changeFeedbackWatcher.start()) {
+    console.log('[SidworksDevTools] JS/Twig change feedback watcher active');
+}
+
+function closeScssSidecar() {
+    if (scssSidecar) {
+        scssSidecar.close();
+    }
+}
+
+function closeChangeFeedbackWatcher() {
+    changeFeedbackWatcher.close();
+}
+
+process.on('SIGINT', closeScssSidecar);
+process.on('SIGTERM', closeScssSidecar);
+process.on('exit', closeScssSidecar);
+process.on('SIGINT', closeChangeFeedbackWatcher);
+process.on('SIGTERM', closeChangeFeedbackWatcher);
+process.on('exit', closeChangeFeedbackWatcher);
+
+function isDocumentRequest(req) {
+    const secFetchDest = (req.headers['sec-fetch-dest'] || req.headers['Sec-Fetch-Dest'] || '').toLowerCase();
+    const secFetchMode = (req.headers['sec-fetch-mode'] || req.headers['Sec-Fetch-Mode'] || '').toLowerCase();
+    const acceptHeader = typeof req.headers.accept === 'string'
+        ? req.headers.accept.toLowerCase()
+        : '';
+
+    return (
+        secFetchDest === 'document' ||
+        secFetchMode === 'navigate' ||
+        acceptHeader.includes('text/html')
+    );
+}
+
+function openOffCanvasScript() {
+    return '<script>document.addEventListener("DOMContentLoaded", () => { setTimeout(() => { if (!document.querySelector(".header-cart-total").textContent.includes("0.00")) { document.querySelector(".header-cart").click(); } }, 500); });</script>';
+}
+
+function applyProxyHeaders(proxyRes, res) {
+    if (proxyRes.statusCode) {
+        res.statusCode = proxyRes.statusCode;
+    }
+
+    for (const [header, value] of Object.entries(proxyRes.headers || {})) {
+        if (typeof value !== 'undefined') {
+            res.setHeader(header, value);
+        }
+    }
+}
+
+function openBrowserWithUrl(url) {
+    const start = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
+    const child = spawn(start, [url], { stdio: 'ignore', detached: true });
+    child.on('error', error => console.log('Unable to open browser! Details:', error));
+}
+
+function isLineItemRequest(requestUrl) {
+    return (requestUrl || '').indexOf('/checkout/line-item/') !== -1;
+}
+
+function isOffcanvasRequest(requestUrl) {
+    return ['/widgets/menu/offcanvas', '/checkout/offcanvas'].some(requestPath => (requestUrl || '').includes(requestPath));
+}
+
+function requiresResponseRewrite(req) {
+    const requestUrl = req.url || '';
+
+    if (isLineItemRequest(requestUrl)) {
+        return true;
+    }
+
+    if (isOffcanvasRequest(requestUrl)) {
+        return true;
+    }
+
+    return isDocumentRequest(req);
+}
+
+function escapeRegExp(value) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function parseUrlOrNull(value) {
+    if (!value || typeof value !== 'string') {
+        return null;
+    }
+
+    try {
+        return new URL(value);
+    } catch (_error) {
+        return null;
+    }
+}
+
+function listenProxyServer(server, protocol, skipSslMessage = false) {
+    server.on('error', (error) => {
+        if (error.code === 'EADDRINUSE') {
+            console.error(`Proxy port ${proxyPort} is already in use.`);
+            console.error('Stop the existing watcher process or use a different STOREFRONT_PROXY_PORT.');
+            process.exit(1);
+        }
+
+        console.error(`Unable to start ${protocol} proxy server:`, error);
+        process.exit(1);
+    });
+
+    server.listen(proxyPort, () => {
+        if (protocol === 'https') {
+            console.log(`[SidworksDevTools] ${tag('PROXY')} using HTTPS with SSL certificate files.`);
+            return;
+        }
+
+        console.log(`[SidworksDevTools] ${tag('PROXY')} using HTTP${skipSslMessage ? ' (SSL certificates are skipped).' : '.'}`);
+    });
+}

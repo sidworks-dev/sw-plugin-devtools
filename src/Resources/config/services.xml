@@ -24,6 +24,11 @@
             <tag name="kernel.event_subscriber"/>
         </service>
 
+        <!-- Optimized storefront watcher command -->
+        <service id="Sidworks\DevTools\Command\WatchCommand">
+            <tag name="console.command"/>
+        </service>
+
         <!-- Controller for Template Search API -->
         <service id="Sidworks\DevTools\Controller\TemplateSearchController" public="true">
             <argument>%kernel.project_dir%</argument>
