@@ -106,7 +106,7 @@ bin/console sidworks:watch
 Fast profile example:
 
 ```bash
-bin/console sidworks:watch --core-only-hot --skip-postcss --skip-plugin-install --no-open-browser
+bin/console sidworks:watch --fast --no-open-browser
 ```
 
 This command:

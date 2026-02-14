@@ -1,5 +1,6 @@
 const os = require('node:os');
 const path = require('node:path');
+const { createRequire } = require('node:module');
 
 const {
     resolveProjectRoot,
@@ -35,6 +36,19 @@ function asString(value, defaultValue) {
     }
 
     return String(value);
+}
+
+function getSassDeprecationsToSilence(sassImplementation) {
+    const silenced = [...storefrontSassDeprecationsList];
+    const implementationInfo = String(sassImplementation?.info || '').toLowerCase();
+
+    // `mixed-decls` is obsolete in newer sass-embedded versions and can emit
+    // an extra warning if we try to silence it there.
+    if (!implementationInfo.includes('sass-embedded')) {
+        silenced.push('mixed-decls');
+    }
+
+    return silenced;
 }
 
 function resolveWebSocketHostname() {
@@ -161,7 +175,7 @@ function patchScssRule(scssRule, options) {
             normalized.options.sassOptions = {
                 ...existingSassOptions,
                 quietDeps: true,
-                silenceDeprecations: options.silenceSassDeprecations ? storefrontSassDeprecationsList : [],
+                silenceDeprecations: options.silenceSassDeprecations ? options.sassDeprecationsToSilence : [],
             };
         }
 
@@ -210,6 +224,7 @@ function loadPatchedWebpackConfig(explicitProjectRoot) {
     const projectRoot = explicitProjectRoot || resolveProjectRoot(__dirname);
     const storefrontApp = resolveStorefrontApp(projectRoot);
     const storefrontRequire = createStorefrontRequire(projectRoot);
+    const runtimeRequire = createRequire(__filename);
     const coreWebpackConfigPath = path.resolve(storefrontApp, 'webpack.config.js');
 
     const useSassEmbedded = asBoolean(process.env.SHOPWARE_STOREFRONT_USE_SASS_EMBEDDED, true);
@@ -234,7 +249,13 @@ function loadPatchedWebpackConfig(explicitProjectRoot) {
                 sassImplementation = storefrontRequire('sass-embedded');
                 console.log('[SidworksDevTools] Using sass-embedded in hot mode');
             } catch (_error) {
-                console.log('[SidworksDevTools] sass-embedded not available, using sass');
+                try {
+                    sassImplementation = runtimeRequire('sass-embedded');
+                    console.log('[SidworksDevTools] Using sass-embedded from runtime in hot mode');
+                } catch (_runtimeError) {
+                    console.log('[SidworksDevTools] sass-embedded not available, using sass');
+                    console.log('[SidworksDevTools] Install hint: npm --prefix vendor/shopware/storefront/Resources/app/storefront i -D sass-embedded');
+                }
             }
         }
     } catch (error) {
@@ -304,6 +325,7 @@ function loadPatchedWebpackConfig(explicitProjectRoot) {
         scssSourceMapEnabled,
         skipPostCss,
         silenceSassDeprecations,
+        sassDeprecationsToSilence: getSassDeprecationsToSilence(sassImplementation),
         sassImplementation,
     });
 

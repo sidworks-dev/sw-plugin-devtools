@@ -34,6 +34,7 @@ class WatchCommand extends Command
             ->addOption('scss-source-map', null, InputOption::VALUE_NONE, 'Enable SCSS source maps in hot mode')
             ->addOption('skip-postcss', null, InputOption::VALUE_NONE, 'Skip PostCSS in hot mode')
             ->addOption('show-sass-deprecations', null, InputOption::VALUE_NONE, 'Show Sass deprecation warnings')
+            ->addOption('fast', null, InputOption::VALUE_NONE, 'Fast preset (core-only-hot, skip-postcss, skip prep-heavy steps)')
             ->addOption('no-open-browser', null, InputOption::VALUE_NONE, 'Disable auto-open browser')
             ->addOption('build-parallelism', null, InputOption::VALUE_REQUIRED, 'Override SHOPWARE_BUILD_PARALLELISM')
             ->addOption('prep-only', null, InputOption::VALUE_NONE, 'Run prep commands only, do not start watcher');
@@ -73,9 +74,14 @@ class WatchCommand extends Command
         }
 
         $packageManager = $this->selectPackageManager($input, $io);
-        $hotEnvironment = $this->buildHotEnvironment($input, $projectRoot);
+        $fastProfile = (bool) $input->getOption('fast');
+        $hotEnvironment = $this->buildHotEnvironment($input, $projectRoot, $fastProfile);
 
-        $this->renderStartupOverview($io, $projectRoot, $packageManager, $storefrontApp, $hotProxyScript, $hotEnvironment);
+        $this->renderStartupOverview($io, $projectRoot, $packageManager, $storefrontApp, $hotProxyScript, $hotEnvironment, $fastProfile);
+
+        if ($fastProfile) {
+            $io->note('Fast profile enabled: core-only-hot + skip-postcss + skip prep-heavy commands.');
+        }
 
         if (!$input->getOption('skip-install') && !is_dir($storefrontApp . '/node_modules/webpack-dev-server')) {
             $io->writeln('Installing storefront dependencies');
@@ -85,7 +91,7 @@ class WatchCommand extends Command
             }
         }
 
-        $prepExitCode = $this->runPrepCommands($input, $output, $projectRoot);
+        $prepExitCode = $this->runPrepCommands($input, $output, $projectRoot, $fastProfile);
         if ($prepExitCode !== 0) {
             return $prepExitCode;
         }
@@ -94,7 +100,7 @@ class WatchCommand extends Command
             return self::SUCCESS;
         }
 
-        if (!$input->getOption('skip-plugin-install')) {
+        if (!$input->getOption('skip-plugin-install') && !$fastProfile) {
             $pluginInstallExitCode = $this->installPluginStorefrontDependencies($packageManager, $projectRoot, $output, $input, $io);
             if ($pluginInstallExitCode !== 0) {
                 return $pluginInstallExitCode;
@@ -105,30 +111,40 @@ class WatchCommand extends Command
         return $this->runProcess($watchProcess, $output, $input);
     }
 
-    private function runPrepCommands(InputInterface $input, OutputInterface $output, string $projectRoot): int
+    private function runPrepCommands(
+        InputInterface $input,
+        OutputInterface $output,
+        string $projectRoot,
+        bool $fastProfile
+    ): int
     {
-        if (!$input->getOption('skip-bundle-dump')) {
+        $skipBundleDump = (bool) $input->getOption('skip-bundle-dump') || $fastProfile;
+        $skipFeatureDump = (bool) $input->getOption('skip-feature-dump') || $fastProfile;
+        $skipThemeCompile = (bool) $input->getOption('skip-theme-compile') || $fastProfile;
+        $skipThemeDump = (bool) $input->getOption('skip-theme-dump') || ($fastProfile && is_file($projectRoot . '/var/theme-files.json'));
+
+        if (!$skipBundleDump) {
             $exitCode = $this->runConsoleCommand(['bundle:dump'], $projectRoot, $output, $input);
             if ($exitCode !== 0) {
                 return $exitCode;
             }
         }
 
-        if (!$input->getOption('skip-feature-dump')) {
+        if (!$skipFeatureDump) {
             $exitCode = $this->runConsoleCommand(['feature:dump'], $projectRoot, $output, $input);
             if ($exitCode !== 0) {
                 return $exitCode;
             }
         }
 
-        if (!$input->getOption('skip-theme-compile')) {
+        if (!$skipThemeCompile) {
             $exitCode = $this->runConsoleCommand(['theme:compile', '--active-only'], $projectRoot, $output, $input);
             if ($exitCode !== 0) {
                 return $exitCode;
             }
         }
 
-        if (!$input->getOption('skip-theme-dump')) {
+        if (!$skipThemeDump) {
             $command = ['theme:dump'];
             $themeName = $input->getOption('theme-name');
             if (\is_string($themeName) && $themeName !== '') {
@@ -147,7 +163,8 @@ class WatchCommand extends Command
         string $packageManager,
         string $storefrontApp,
         string $hotProxyScript,
-        array $hotEnvironment
+        array $hotEnvironment,
+        bool $fastProfile
     ): void {
         $io->title('Sidworks Storefront Watcher');
         $io->section('Runtime');
@@ -160,6 +177,7 @@ class WatchCommand extends Command
         $io->section('Build Profile');
         $io->definitionList(
             ['Core-only hot mode' => $this->yesNo($hotEnvironment['SHOPWARE_STOREFRONT_HOT_CORE_ONLY'])],
+            ['Fast preset' => $this->yesNo($fastProfile ? '1' : '0')],
             ['Twig watch mode' => \sprintf('<info>%s</info>', $hotEnvironment['SHOPWARE_STOREFRONT_TWIG_WATCH_MODE'])],
             ['Build parallelism' => \sprintf('<info>%s</info>', $hotEnvironment['SHOPWARE_BUILD_PARALLELISM'])],
             ['JS source maps' => $this->yesNo($hotEnvironment['SHOPWARE_STOREFRONT_JS_SOURCE_MAP'])],
@@ -296,7 +314,7 @@ class WatchCommand extends Command
         return 'npm';
     }
 
-    private function buildHotEnvironment(InputInterface $input, string $projectRoot): array
+    private function buildHotEnvironment(InputInterface $input, string $projectRoot, bool $fastProfile): array
     {
         $buildParallelism = $this->env('SHOPWARE_BUILD_PARALLELISM', '');
         if ($buildParallelism === '') {
@@ -322,7 +340,7 @@ class WatchCommand extends Command
             'SHOPWARE_BUILD_PARALLELISM' => $buildParallelism,
             'SHOPWARE_STOREFRONT_DEV_CACHE' => $this->env('SHOPWARE_STOREFRONT_DEV_CACHE', '1'),
             'SHOPWARE_STOREFRONT_USE_SASS_EMBEDDED' => $this->env('SHOPWARE_STOREFRONT_USE_SASS_EMBEDDED', '1'),
-            'SHOPWARE_STOREFRONT_HOT_CORE_ONLY' => $input->getOption('core-only-hot')
+            'SHOPWARE_STOREFRONT_HOT_CORE_ONLY' => ($input->getOption('core-only-hot') || $fastProfile)
                 ? '1'
                 : $this->env('SHOPWARE_STOREFRONT_HOT_CORE_ONLY', '0'),
             'SHOPWARE_STOREFRONT_TWIG_WATCH_MODE' => $twigWatchMode,
@@ -332,7 +350,7 @@ class WatchCommand extends Command
             'SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP' => $input->getOption('scss-source-map')
                 ? '1'
                 : $this->env('SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP', '0'),
-            'SHOPWARE_STOREFRONT_SKIP_POSTCSS' => $input->getOption('skip-postcss')
+            'SHOPWARE_STOREFRONT_SKIP_POSTCSS' => ($input->getOption('skip-postcss') || $fastProfile)
                 ? '1'
                 : $this->env('SHOPWARE_STOREFRONT_SKIP_POSTCSS', '0'),
             'SHOPWARE_STOREFRONT_SASS_SILENCE_DEPRECATIONS' => $input->getOption('show-sass-deprecations')
