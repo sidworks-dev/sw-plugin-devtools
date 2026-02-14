@@ -7,6 +7,7 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 
 const createLiveReloadServer = require('./live-reload-server');
+const { createScssSidecar } = require('./scss-sidecar');
 const {
     resolveProjectRoot,
     createStorefrontRequire,
@@ -23,6 +24,7 @@ process.env.MODE = process.env.MODE || 'hot';
 const proxyPort = Number(process.env.STOREFRONT_PROXY_PORT) || 9998;
 const assetPort = Number(process.env.STOREFRONT_ASSETS_PORT) || 9999;
 const shouldOpenBrowser = process.env.SHOPWARE_STOREFRONT_OPEN_BROWSER !== '0';
+const scssEngine = String(process.env.SHOPWARE_STOREFRONT_SCSS_ENGINE || 'webpack').toLowerCase();
 const noOp = () => {};
 
 const themeFilesConfigPath = path.resolve(projectRootPath, 'var/theme-files.json');
@@ -94,6 +96,11 @@ const baseProxyOptions = {
         '*': '',
     },
 };
+
+let scssSidecar = null;
+if (scssEngine === 'sass-cli') {
+    scssSidecar = createScssSidecar(projectRootPath);
+}
 
 function onProxyReq(proxyReq, req) {
     const requestUrl = req.url || '';
@@ -180,6 +187,10 @@ const rewriteProxy = createProxyMiddleware({
                     .replace(profilerPattern, '/_wdt')
                     .replace(xdebugIgnorePattern, 'new URL(window.location.protocol+\'//\'+window.location.host+url);                url.searchParams.set(\'XDEBUG_IGNORE\'');
 
+                if (scssSidecar && isDocumentRequest(req)) {
+                    body = scssSidecar.injectMarkup(body, proxyUrlEnv.origin);
+                }
+
                 res.removeHeader('content-length');
                 res.end(body);
             });
@@ -189,6 +200,10 @@ const rewriteProxy = createProxyMiddleware({
 });
 
 const proxy = (req, res) => {
+    if (scssSidecar && scssSidecar.handleInternalRequest(req, res)) {
+        return;
+    }
+
     if (requiresResponseRewrite(req)) {
         rewriteProxy(req, res, noOp);
         return;
@@ -246,6 +261,26 @@ server.then(() => {
 
     console.log(`Auto-open browser disabled. Open manually: ${proxyUrlEnv.origin}`);
 });
+
+if (scssSidecar) {
+    scssSidecar.start().then((started) => {
+        if (started) {
+            console.log('[SidworksDevTools] SCSS sidecar active (sass-cli mode)');
+        }
+    }).catch((error) => {
+        console.error('[SidworksDevTools] Failed to start SCSS sidecar:', error.message);
+    });
+}
+
+function closeScssSidecar() {
+    if (scssSidecar) {
+        scssSidecar.close();
+    }
+}
+
+process.on('SIGINT', closeScssSidecar);
+process.on('SIGTERM', closeScssSidecar);
+process.on('exit', closeScssSidecar);
 
 function isDocumentRequest(req) {
     const secFetchDest = (req.headers['sec-fetch-dest'] || req.headers['Sec-Fetch-Dest'] || '').toLowerCase();

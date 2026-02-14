@@ -112,8 +112,21 @@ bin/console sidworks:watch --fast --no-open-browser
 This command:
 1. Runs storefront prep commands (`bundle:dump`, `feature:dump`, `theme:*`) unless skipped
 2. Ensures storefront dependencies exist
-3. Starts the plugin hot-proxy runtime directly (no `watch.sh`/`watch.mjs` wrapper)
-4. Uses `sass-embedded` by default via `SHOPWARE_STOREFRONT_USE_SASS_EMBEDDED=1`
+3. Auto-installs `sass-embedded` in the storefront app when missing (unless disabled)
+4. Starts the plugin hot-proxy runtime directly (no `watch.sh`/`watch.mjs` wrapper)
+5. Uses `sass-embedded` by default via `SHOPWARE_STOREFRONT_USE_SASS_EMBEDDED=1`
+
+Disable auto install if needed:
+
+```bash
+bin/console sidworks:watch --skip-sass-embedded-install
+```
+
+or via environment variable:
+
+```bash
+SHOPWARE_STOREFRONT_AUTO_INSTALL_SASS_EMBEDDED=0
+```
 
 ### Storefront Hot Proxy Override
 

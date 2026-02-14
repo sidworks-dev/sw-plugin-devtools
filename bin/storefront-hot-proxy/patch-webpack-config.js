@@ -234,6 +234,8 @@ function loadPatchedWebpackConfig(explicitProjectRoot) {
     const skipPostCss = asBoolean(process.env.SHOPWARE_STOREFRONT_SKIP_POSTCSS, false);
     const silenceSassDeprecations = asBoolean(process.env.SHOPWARE_STOREFRONT_SASS_SILENCE_DEPRECATIONS, true);
     const coreOnlyHotMode = asBoolean(process.env.SHOPWARE_STOREFRONT_HOT_CORE_ONLY, false);
+    const scssEngine = asString(process.env.SHOPWARE_STOREFRONT_SCSS_ENGINE, 'webpack').toLowerCase();
+    const useScssSidecar = scssEngine === 'sass-cli';
     const twigWatchMode = asString(process.env.SHOPWARE_STOREFRONT_TWIG_WATCH_MODE, 'narrow').toLowerCase();
 
     if (twigWatchMode === 'narrow') {
@@ -289,6 +291,15 @@ function loadPatchedWebpackConfig(explicitProjectRoot) {
         coreConfig.entry.storefront = path.resolve(storefrontApp, 'src/main.js');
     }
 
+    if (useScssSidecar) {
+        const webpackLib = storefrontRequire('webpack');
+        coreConfig.plugins = coreConfig.plugins || [];
+        coreConfig.plugins.push(
+            new webpackLib.NormalModuleReplacementPlugin(/theme-entry\.scss$/, path.resolve(__dirname, 'empty-theme-entry.js')),
+        );
+        console.log('[SidworksDevTools] SCSS sidecar mode enabled (theme-entry.scss removed from webpack)');
+    }
+
     const assetPort = parseInt(process.env.STOREFRONT_ASSETS_PORT || '', 10) || 9999;
     if (coreConfig.devServer) {
         const clientConfig = coreConfig.devServer.client || {};
@@ -320,14 +331,16 @@ function loadPatchedWebpackConfig(explicitProjectRoot) {
         twigWatchMode,
     });
 
-    const scssRule = findScssRule(coreConfig?.module?.rules);
-    patchScssRule(scssRule, {
-        scssSourceMapEnabled,
-        skipPostCss,
-        silenceSassDeprecations,
-        sassDeprecationsToSilence: getSassDeprecationsToSilence(sassImplementation),
-        sassImplementation,
-    });
+    if (!useScssSidecar) {
+        const scssRule = findScssRule(coreConfig?.module?.rules);
+        patchScssRule(scssRule, {
+            scssSourceMapEnabled,
+            skipPostCss,
+            silenceSassDeprecations,
+            sassDeprecationsToSilence: getSassDeprecationsToSilence(sassImplementation),
+            sassImplementation,
+        });
+    }
 
     const effectiveConfigArray = coreOnlyHotMode ? [coreConfig] : configArray;
 
