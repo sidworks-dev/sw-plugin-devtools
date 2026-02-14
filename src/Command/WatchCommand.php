@@ -434,6 +434,10 @@ class WatchCommand extends Command
             : 'narrow';
 
         $useSassEmbedded = $this->env('SHOPWARE_STOREFRONT_USE_SASS_EMBEDDED', '1');
+        $scssSourceMapEnabled = $this->env(
+            'SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP',
+            $scssEngine === 'sass-cli' ? '1' : '0'
+        );
 
         $environment = [
             'PROJECT_ROOT' => $projectRoot,
@@ -448,7 +452,7 @@ class WatchCommand extends Command
             'SHOPWARE_STOREFRONT_HOT_CORE_ONLY' => $disableJs ? '1' : '0',
             'SHOPWARE_STOREFRONT_TWIG_WATCH_MODE' => $twigWatchMode,
             'SHOPWARE_STOREFRONT_JS_SOURCE_MAP' => '0',
-            'SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP' => '0',
+            'SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP' => $scssSourceMapEnabled,
             'SHOPWARE_STOREFRONT_SCSS_ENGINE' => $scssEngine,
             'SHOPWARE_STOREFRONT_SKIP_POSTCSS' => '1',
             'SHOPWARE_STOREFRONT_SASS_SILENCE_DEPRECATIONS' => '1',
