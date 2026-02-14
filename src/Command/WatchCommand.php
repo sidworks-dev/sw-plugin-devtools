@@ -75,7 +75,7 @@ class WatchCommand extends Command
         $packageManager = $this->selectPackageManager($input, $io);
         $hotEnvironment = $this->buildHotEnvironment($input, $projectRoot);
 
-        $this->renderStartupOverview($io, $packageManager, $storefrontApp, $hotProxyScript, $hotEnvironment);
+        $this->renderStartupOverview($io, $projectRoot, $packageManager, $storefrontApp, $hotProxyScript, $hotEnvironment);
 
         if (!$input->getOption('skip-install') && !is_dir($storefrontApp . '/node_modules/webpack-dev-server')) {
             $io->writeln('Installing storefront dependencies');
@@ -143,6 +143,7 @@ class WatchCommand extends Command
 
     private function renderStartupOverview(
         SymfonyStyle $io,
+        string $projectRoot,
         string $packageManager,
         string $storefrontApp,
         string $hotProxyScript,
@@ -152,8 +153,8 @@ class WatchCommand extends Command
         $io->section('Runtime');
         $io->definitionList(
             ['Package manager' => \sprintf('<info>%s</info>', $packageManager)],
-            ['Storefront app' => \sprintf('<comment>%s</comment>', $storefrontApp)],
-            ['Hot proxy runtime' => \sprintf('<comment>%s</comment>', $hotProxyScript)],
+            ['Storefront app' => \sprintf('<comment>%s</comment>', $this->formatPathForDisplay($storefrontApp, $projectRoot))],
+            ['Hot proxy runtime' => \sprintf('<comment>%s</comment>', $this->formatPathForDisplay($hotProxyScript, $projectRoot))],
         );
 
         $io->section('Build Profile');
@@ -170,6 +171,10 @@ class WatchCommand extends Command
 
     private function runConsoleCommand(array $arguments, string $projectRoot, OutputInterface $output, InputInterface $input): int
     {
+        if (!\in_array('--no-interaction', $arguments, true) && !\in_array('-n', $arguments, true)) {
+            $arguments[] = '--no-interaction';
+        }
+
         $process = new Process([PHP_BINARY, $projectRoot . '/bin/console', ...$arguments], $projectRoot, null, null, null);
         return $this->runProcess($process, $output, $input);
     }
@@ -460,5 +465,17 @@ class WatchCommand extends Command
     private function yesNo(string $value): string
     {
         return $value === '1' ? '<info>yes</info>' : '<comment>no</comment>';
+    }
+
+    private function formatPathForDisplay(string $path, string $projectRoot): string
+    {
+        $normalizedPath = str_replace('\\', '/', $path);
+        $normalizedProjectRoot = rtrim(str_replace('\\', '/', $projectRoot), '/');
+
+        if ($normalizedProjectRoot !== '' && str_starts_with($normalizedPath, $normalizedProjectRoot . '/')) {
+            return '<project>/' . ltrim(substr($normalizedPath, strlen($normalizedProjectRoot)), '/');
+        }
+
+        return $normalizedPath;
     }
 }

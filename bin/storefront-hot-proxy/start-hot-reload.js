@@ -26,18 +26,43 @@ const shouldOpenBrowser = process.env.SHOPWARE_STOREFRONT_OPEN_BROWSER !== '0';
 const noOp = () => {};
 
 const themeFilesConfigPath = path.resolve(projectRootPath, 'var/theme-files.json');
-const themeFiles = require(themeFilesConfigPath);
-const domainUrl = new URL(themeFiles.domainUrl);
-const themeUrl = new URL(`${domainUrl.protocol}//${domainUrl.host}`);
+let themeFiles = {};
+if (fs.existsSync(themeFilesConfigPath)) {
+    try {
+        // eslint-disable-next-line global-require, import/no-dynamic-require
+        themeFiles = require(themeFilesConfigPath);
+    } catch (error) {
+        console.warn('[SidworksDevTools] Unable to read var/theme-files.json:', error.message);
+    }
+}
 
-const appUrlEnv = themeUrl ? themeUrl : new URL(process.env.APP_URL);
-const keyPath = process.env.STOREFRONT_HTTPS_KEY_FILE || `${process.env.CAROOT}/${themeUrl.hostname}-key.pem`;
-const certPath = process.env.STOREFRONT_HTTPS_CERTIFICATE_FILE || `${process.env.CAROOT}/${themeUrl.hostname}.pem`;
+const appUrlFromThemeFiles = parseUrlOrNull(typeof themeFiles.domainUrl === 'string' ? themeFiles.domainUrl.trim() : '');
+const appUrlFromEnv = parseUrlOrNull(process.env.APP_URL || '');
+
+if (!appUrlFromThemeFiles && appUrlFromEnv) {
+    console.log('[SidworksDevTools] theme-files domainUrl is empty/invalid. Falling back to APP_URL.');
+}
+
+const appUrlEnv = appUrlFromThemeFiles
+    ? new URL(`${appUrlFromThemeFiles.protocol}//${appUrlFromThemeFiles.host}`)
+    : (appUrlFromEnv || new URL('http://localhost'));
+
+if (!appUrlFromThemeFiles && !appUrlFromEnv) {
+    console.warn('[SidworksDevTools] APP_URL is missing/invalid. Falling back to http://localhost.');
+}
+
+const caRoot = process.env.CAROOT || '';
+const keyPath = process.env.STOREFRONT_HTTPS_KEY_FILE || (caRoot ? `${caRoot}/${appUrlEnv.hostname}-key.pem` : '');
+const certPath = process.env.STOREFRONT_HTTPS_CERTIFICATE_FILE || (caRoot ? `${caRoot}/${appUrlEnv.hostname}.pem` : '');
 const skipSslCerts = process.env.STOREFRONT_SKIP_SSL_CERT === 'true';
-const sslFilesFound = (fs.existsSync(keyPath) && fs.existsSync(certPath));
+const sslFilesFound = keyPath !== '' && certPath !== '' && fs.existsSync(keyPath) && fs.existsSync(certPath);
 
 const proxyProtocol = (appUrlEnv.protocol === 'https:' && sslFilesFound || skipSslCerts) ? 'https:' : 'http:';
-const proxyUrlEnv = new URL(process.env.PROXY_URL || `${proxyProtocol}//${appUrlEnv.hostname}:${proxyPort}`);
+const proxyUrlFromEnv = parseUrlOrNull(process.env.PROXY_URL || '');
+if (!proxyUrlFromEnv && process.env.PROXY_URL) {
+    console.warn('[SidworksDevTools] PROXY_URL is invalid. Falling back to generated proxy URL.');
+}
+const proxyUrlEnv = proxyUrlFromEnv || new URL(`${proxyProtocol}//${appUrlEnv.hostname}:${proxyPort}`);
 
 const appOriginWithSlashPattern = new RegExp(`${escapeRegExp(`${appUrlEnv.origin}/`)}`, 'g');
 const proxyMediaPattern = new RegExp(`${escapeRegExp(`${proxyUrlEnv.origin}/media/`)}`, 'g');
@@ -282,6 +307,18 @@ function requiresResponseRewrite(req) {
 
 function escapeRegExp(value) {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function parseUrlOrNull(value) {
+    if (!value || typeof value !== 'string') {
+        return null;
+    }
+
+    try {
+        return new URL(value);
+    } catch (_error) {
+        return null;
+    }
 }
 
 function listenProxyServer(server, protocol, skipSslMessage = false) {
