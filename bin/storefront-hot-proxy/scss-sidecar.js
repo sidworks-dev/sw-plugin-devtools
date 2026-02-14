@@ -13,7 +13,9 @@ const {
 
 const HOT_CSS_BASE_PATH = '/_sidworks_hot';
 const HOT_CSS_FILE_NAME = 'sidworks-hot.css';
+const HOT_CSS_MAP_FILE_NAME = `${HOT_CSS_FILE_NAME}.map`;
 const HOT_CSS_ROUTE = `${HOT_CSS_BASE_PATH}/${HOT_CSS_FILE_NAME}`;
+const HOT_CSS_MAP_ROUTE = `${HOT_CSS_BASE_PATH}/${HOT_CSS_MAP_FILE_NAME}`;
 const HOT_CSS_EVENTS_ROUTE = `${HOT_CSS_BASE_PATH}/events`;
 
 const sassDeprecations = ['import', 'global-builtin', 'color-functions', 'slash-div', 'legacy-js-api'];
@@ -149,6 +151,8 @@ function createScssSidecar(projectRoot) {
     const themeConfigPath = path.resolve(rootPath, 'files/theme-config/index.json');
     const fallbackThemeVariablesPath = path.resolve(rootPath, 'var/theme-variables.scss');
     const cssOutputPath = path.resolve(generatedEntryDirectoryPath, HOT_CSS_FILE_NAME);
+    const cssMapOutputPath = path.resolve(generatedEntryDirectoryPath, HOT_CSS_MAP_FILE_NAME);
+    const scssSourceMapEnabled = asString(process.env.SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP, '1') === '1';
 
     const state = {
         subscribers: new Set(),
@@ -560,6 +564,11 @@ function createScssSidecar(projectRoot) {
                 recursive: true,
             });
             await fs.promises.writeFile(cssOutputPath, result.css || '', 'utf8');
+            if (scssSourceMapEnabled && typeof result.map === 'string' && result.map !== '') {
+                await fs.promises.writeFile(cssMapOutputPath, result.map, 'utf8');
+            } else if (fs.existsSync(cssMapOutputPath)) {
+                await fs.promises.unlink(cssMapOutputPath);
+            }
 
             state.version = Date.now();
             updateWatchSet(result.loadedFiles, compileEntryPath);
@@ -588,7 +597,8 @@ function createScssSidecar(projectRoot) {
             state.sassImplementation.render({
                 file: entryPath,
                 outFile: cssOutputPath,
-                sourceMap: false,
+                sourceMap: scssSourceMapEnabled,
+                sourceMapContents: scssSourceMapEnabled,
                 outputStyle: 'expanded',
                 quietDeps: true,
                 includePaths: [
@@ -625,6 +635,7 @@ function createScssSidecar(projectRoot) {
 
                 resolve({
                     css: result.css.toString(),
+                    map: result.map ? result.map.toString() : '',
                     loadedFiles: result.stats && Array.isArray(result.stats.includedFiles)
                         ? result.stats.includedFiles
                         : [],
@@ -711,6 +722,24 @@ function createScssSidecar(projectRoot) {
                 'Access-Control-Allow-Origin': '*',
             });
             fs.createReadStream(cssOutputPath).pipe(res);
+            return true;
+        }
+
+        if (requestPath === HOT_CSS_MAP_ROUTE) {
+            if (!fs.existsSync(cssMapOutputPath)) {
+                res.writeHead(404, {
+                    'Content-Type': 'text/plain',
+                });
+                res.end('SCSS sidecar source map not ready');
+                return true;
+            }
+
+            res.writeHead(200, {
+                'Content-Type': 'application/json; charset=utf-8',
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                'Access-Control-Allow-Origin': '*',
+            });
+            fs.createReadStream(cssMapOutputPath).pipe(res);
             return true;
         }
 
