@@ -119,7 +119,11 @@ This command:
 
 This plugin also ships a standalone copy of the Shopware storefront hot-proxy runtime under:
 
-`custom/plugins/SidworksDevTools/bin/storefront-hot-proxy/`
+`<plugin-root>/bin/storefront-hot-proxy/`
+
+`<plugin-root>` can be either:
+- `custom/plugins/SidworksDevTools`
+- `vendor/sidworks/sw-plugin-devtools` (Composer/vendor install)
 
 The project root watcher (`bin/watch-storefront.sh`) automatically uses this runtime when present, so you can keep watcher/performance changes outside `vendor/shopware/*`.
 

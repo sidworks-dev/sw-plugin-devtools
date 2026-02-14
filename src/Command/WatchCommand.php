@@ -44,8 +44,9 @@ class WatchCommand extends Command
         $io = new SymfonyStyle($input, $output);
 
         $projectRoot = $this->resolveProjectRoot(__DIR__);
+        $pluginRoot = \dirname(__DIR__, 2);
         $storefrontApp = $this->resolveStorefrontApp($projectRoot);
-        $hotProxyScript = $projectRoot . '/custom/plugins/SidworksDevTools/bin/storefront-hot-proxy/start-hot-reload.js';
+        $hotProxyScript = $this->resolveHotProxyScript($projectRoot, $pluginRoot);
 
         if (!is_dir($storefrontApp)) {
             $io->error(\sprintf('Storefront app not found: %s', $storefrontApp));
@@ -53,8 +54,13 @@ class WatchCommand extends Command
             return self::FAILURE;
         }
 
-        if (!is_file($hotProxyScript)) {
-            $io->error(\sprintf('Hot proxy script not found: %s', $hotProxyScript));
+        if ($hotProxyScript === null || !is_file($hotProxyScript)) {
+            $configuredPath = $this->env('SHOPWARE_STOREFRONT_HOT_PROXY_SCRIPT', '');
+            if ($configuredPath !== '') {
+                $io->error(\sprintf('Hot proxy script not found: %s', $configuredPath));
+            } else {
+                $io->error('Hot proxy script not found. Set SHOPWARE_STOREFRONT_HOT_PROXY_SCRIPT if the plugin is installed in a custom location.');
+            }
 
             return self::FAILURE;
         }
@@ -348,6 +354,33 @@ class WatchCommand extends Command
         }
 
         return $projectRoot . '/vendor/shopware/storefront/Resources/app/storefront';
+    }
+
+    private function resolveHotProxyScript(string $projectRoot, string $pluginRoot): ?string
+    {
+        $configuredPath = $this->env('SHOPWARE_STOREFRONT_HOT_PROXY_SCRIPT', '');
+        if ($configuredPath !== '') {
+            return $configuredPath;
+        }
+
+        $candidates = [
+            $pluginRoot . '/bin/storefront-hot-proxy/start-hot-reload.js',
+            $projectRoot . '/custom/plugins/SidworksDevTools/bin/storefront-hot-proxy/start-hot-reload.js',
+            $projectRoot . '/vendor/sidworks/sw-plugin-devtools/bin/storefront-hot-proxy/start-hot-reload.js',
+        ];
+
+        $globCandidates = glob($projectRoot . '/vendor/*/sw-plugin-devtools/bin/storefront-hot-proxy/start-hot-reload.js');
+        if (\is_array($globCandidates) && $globCandidates !== []) {
+            $candidates = array_merge($candidates, $globCandidates);
+        }
+
+        foreach ($candidates as $candidate) {
+            if (\is_string($candidate) && is_file($candidate)) {
+                return $candidate;
+            }
+        }
+
+        return null;
     }
 
     private function resolveProjectRoot(string $startDirectory): string
