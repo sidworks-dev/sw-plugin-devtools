@@ -1,14 +1,19 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 /**
- * SidworksDevTools — Fast SCSS Watcher
+ * SidworksDevTools — Fast Multi-Theme SCSS Watcher
  *
  * Compiles Shopware 6.7 storefront SCSS with dart-sass (~500ms) and
  * runs an SSE server for instant CSS hot-reload without page refresh.
  *
- * Usage: bin/watch.sh (from plugin directory)
+ * Works with both Bun and Node.js.
+ *
+ * Usage: bun run custom/plugins/SidworksDevTools/bin/watch.mjs
+ *    or: node custom/plugins/SidworksDevTools/bin/watch.mjs
  */
-import { readFileSync, writeFileSync, mkdirSync, existsSync, watch, statSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, watch } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { createServer } from 'node:http';
 import * as sass from 'sass';
 
 const PLUGIN_ROOT = resolve(dirname(new URL(import.meta.url).pathname), '..');
@@ -34,52 +39,55 @@ if (!PROJECT_ROOT) {
 const STOREFRONT_APP = join(PROJECT_ROOT, 'vendor/shopware/storefront/Resources/app/storefront');
 const HOT_RELOAD_PORT = 9779;
 
-// ── Load configuration ──────────────────────────────────────────────────────
+// ── Prep: run sidworks:watch console command via ddev ────────────────────────
 
-const themeFiles = JSON.parse(readFileSync(join(PROJECT_ROOT, 'var/theme-files.json'), 'utf-8'));
-const plugins = JSON.parse(readFileSync(join(PROJECT_ROOT, 'var/plugins.json'), 'utf-8'));
-const features = JSON.parse(readFileSync(join(PROJECT_ROOT, 'var/config_js_features.json'), 'utf-8'));
+const skipPrep = process.argv.includes('--skip-prep');
 
-const themeId = themeFiles.themeId;
-
-// ── Find the actual compiled theme path ─────────────────────────────────────
-
-function findCompiledThemePath() {
-    const themeDir = join(PROJECT_ROOT, 'public/theme');
-    if (!existsSync(themeDir)) return null;
-
-    let newest = null;
-    let newestTime = 0;
-
-    for (const dir of readdirSync(themeDir)) {
-        const cssFile = join(themeDir, dir, 'css', 'all.css');
-        if (existsSync(cssFile)) {
-            const mtime = statSync(cssFile).mtimeMs;
-            if (mtime > newestTime) {
-                newestTime = mtime;
-                newest = cssFile;
-            }
-        }
+if (!skipPrep) {
+    console.log('\n  Preparing themes via ddev exec bin/console sidworks:watch --prep-only ...\n');
+    const result = spawnSync('ddev', ['exec', 'bin/console', 'sidworks:watch', '--prep-only'], {
+        cwd: PROJECT_ROOT,
+        stdio: 'inherit',
+    });
+    if (result.status !== 0) {
+        console.error('  \x1b[31m✗\x1b[0m sidworks:watch failed.');
+        process.exit(1);
     }
-
-    return newest;
+    console.log('');
 }
 
-const outputFile = findCompiledThemePath();
-if (!outputFile) {
-    console.error('  \x1b[31m✗\x1b[0m No compiled theme CSS found in public/theme/.');
-    console.error('    Run: ddev exec bin/console theme:compile --active-only');
+// ── Load configuration ──────────────────────────────────────────────────────
+
+const watchThemesPath = join(PROJECT_ROOT, 'var/sidworks-watch-themes.json');
+if (!existsSync(watchThemesPath)) {
+    console.error('  \x1b[31m✗\x1b[0m var/sidworks-watch-themes.json not found.');
+    console.error('    Run: ddev exec bin/console sidworks:watch');
     process.exit(1);
 }
 
-const outputDir = dirname(outputFile);
-const themeHash = outputFile.split('/theme/')[1].split('/')[0];
+const watchConfig = JSON.parse(readFileSync(watchThemesPath, 'utf-8'));
+const themes = watchConfig.themes;
+
+if (!themes || themes.length === 0) {
+    console.error('  \x1b[31m✗\x1b[0m No themes found in sidworks-watch-themes.json');
+    process.exit(1);
+}
+
+const features = JSON.parse(readFileSync(join(PROJECT_ROOT, 'var/config_js_features.json'), 'utf-8'));
+const plugins = JSON.parse(readFileSync(join(PROJECT_ROOT, 'var/plugins.json'), 'utf-8'));
+
+// ── Console output ──────────────────────────────────────────────────────────
 
 console.log(`\n  SidworksDevTools — Fast SCSS Watcher`);
 console.log(`  ─────────────────────────────────────`);
 console.log(`  Project:    ${PROJECT_ROOT}`);
-console.log(`  Theme hash: ${themeHash}`);
-console.log(`  Output:     public/theme/${themeHash}/css/all.css`);
+console.log(`  Themes:     ${themes.length}`);
+for (const theme of themes) {
+    console.log(`    ${theme.technicalName} (${theme.themeId.substring(0, 8)}...)`);
+    for (const op of theme.outputPaths) {
+        console.log(`      → public/theme/${op.themeHash}/css/all.css`);
+    }
+}
 console.log(`  Hot reload: http://localhost:${HOT_RELOAD_PORT}\n`);
 
 // ── Generate feature flags SCSS map ─────────────────────────────────────────
@@ -117,17 +125,18 @@ function toHostPath(dockerPath) {
     return dockerPath.replace(/^\/var\/www\/html\//, PROJECT_ROOT + '/');
 }
 
-// ── Generate SCSS entry content ─────────────────────────────────────────────
+// ── Generate SCSS entry content for a specific theme ────────────────────────
 
-function generateEntry() {
-    const themeVarsPath = join(PROJECT_ROOT, 'var/theme-variables', `${themeId}.scss`);
-    const coreStyles = themeFiles.style.map(s => toHostPath(s.filepath));
+function generateEntry(theme) {
+    const themeVarsPath = join(PROJECT_ROOT, 'var/theme-variables', `${theme.themeId}.scss`);
+    const coreStyles = theme.style.map(s => toHostPath(s.filepath));
     const pluginStyles = collectPluginStyles();
+    const firstHash = theme.outputPaths[0]?.themeHash ?? '';
 
     let entry = '// Auto-generated by SidworksDevTools watch.mjs\n\n';
     entry += generateFeatureFlags() + '\n\n';
     entry += `@import "${themeVarsPath}";\n\n`;
-    entry += `$app-css-relative-asset-path: '/theme/${themeHash}/assets';\n`;
+    entry += `$app-css-relative-asset-path: '/theme/${firstHash}/assets';\n`;
     entry += `$sw-asset-public-url: '';\n`;
     entry += `$sw-asset-theme-url: '';\n`;
     entry += `$sw-asset-asset-url: '';\n`;
@@ -170,7 +179,7 @@ const tildeImporter = {
     }
 };
 
-// ── Compile SCSS ────────────────────────────────────────────────────────────
+// ── Compile SCSS for all themes ─────────────────────────────────────────────
 
 let compileTimeout = null;
 let isCompiling = false;
@@ -180,42 +189,56 @@ function compileSCSS() {
     if (isCompiling) return;
     isCompiling = true;
 
-    const entry = generateEntry();
     const startTime = performance.now();
+    let allOk = true;
 
-    try {
-        const result = sass.compileString(entry, {
-            loadPaths: [
-                join(STOREFRONT_APP, 'src/scss'),
-                STOREFRONT_APP,
-            ],
-            importers: [tildeImporter],
-            style: 'expanded',
-            sourceMap: false,
-            silenceDeprecations: [
-                'import',
-                'slash-div',
-                'color-functions',
-                'global-builtin',
-                'if-function',
-            ],
-        });
+    for (const theme of themes) {
+        const entry = generateEntry(theme);
 
-        mkdirSync(outputDir, { recursive: true });
-        writeFileSync(outputFile, result.css);
-        cssVersion++;
+        try {
+            const result = sass.compileString(entry, {
+                loadPaths: [
+                    join(STOREFRONT_APP, 'src/scss'),
+                    STOREFRONT_APP,
+                ],
+                importers: [tildeImporter],
+                style: 'expanded',
+                sourceMap: false,
+                silenceDeprecations: [
+                    'import',
+                    'slash-div',
+                    'color-functions',
+                    'global-builtin',
+                    'if-function',
+                ],
+            });
 
-        const elapsed = (performance.now() - startTime).toFixed(0);
-        console.log(`  \x1b[32m✓\x1b[0m Compiled in ${elapsed}ms`);
-
-        notifyClients('css');
-    } catch (error) {
-        const elapsed = (performance.now() - startTime).toFixed(0);
-        console.error(`  \x1b[31m✗\x1b[0m Failed (${elapsed}ms):`);
-        console.error(`    ${error.message.split('\n').join('\n    ')}`);
-    } finally {
-        isCompiling = false;
+            // Write CSS to all output paths for this theme
+            for (const op of theme.outputPaths) {
+                const outputDir = join(PROJECT_ROOT, 'public/theme', op.themeHash, 'css');
+                const outputFile = join(outputDir, 'all.css');
+                mkdirSync(outputDir, { recursive: true });
+                writeFileSync(outputFile, result.css);
+            }
+        } catch (error) {
+            allOk = false;
+            console.error(`  \x1b[31m✗\x1b[0m ${theme.technicalName}: ${error.message.split('\n').join('\n    ')}`);
+        }
     }
+
+    const elapsed = (performance.now() - startTime).toFixed(0);
+
+    if (allOk) {
+        cssVersion++;
+        const themeCount = themes.length;
+        const pathCount = themes.reduce((n, t) => n + t.outputPaths.length, 0);
+        console.log(`  \x1b[32m✓\x1b[0m Compiled ${themeCount} theme(s) → ${pathCount} output(s) in ${elapsed}ms`);
+        notifyClients('css');
+    } else {
+        console.error(`  \x1b[31m✗\x1b[0m Compilation had errors (${elapsed}ms)`);
+    }
+
+    isCompiling = false;
 }
 
 function debouncedCompile() {
@@ -260,57 +283,46 @@ const CLIENT_SCRIPT = `(function() {
   console.log('[hot-reload] connected');
 })();`;
 
-const server = Bun.serve({
-    port: HOT_RELOAD_PORT,
-    idleTimeout: 255, // max value — keeps SSE connections alive
-    fetch(req) {
-        const url = new URL(req.url);
+const server = createServer((req, res) => {
+    const url = new URL(req.url, `http://localhost:${HOT_RELOAD_PORT}`);
+    res.setHeader('Access-Control-Allow-Origin', '*');
 
-        if (url.pathname === '/events') {
-            return new Response(
-                new ReadableStream({
-                    start(controller) {
-                        const client = {
-                            write(data) {
-                                controller.enqueue(new TextEncoder().encode(data));
-                            },
-                        };
-                        clients.add(client);
-                        req.signal.addEventListener('abort', () => clients.delete(client));
-                    },
-                }),
-                {
-                    headers: {
-                        'Content-Type': 'text/event-stream',
-                        'Cache-Control': 'no-cache',
-                        'Connection': 'keep-alive',
-                        'Access-Control-Allow-Origin': '*',
-                    },
-                },
-            );
+    if (url.pathname === '/events') {
+        res.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+        });
+        const client = { write: (data) => res.write(data) };
+        clients.add(client);
+        req.on('close', () => clients.delete(client));
+        return;
+    }
+
+    if (url.pathname === '/client.js') {
+        res.writeHead(200, { 'Content-Type': 'application/javascript' });
+        res.end(CLIENT_SCRIPT);
+        return;
+    }
+
+    if (url.pathname === '/') {
+        let info = `SidworksDevTools — Hot-reload server\n\nThemes:\n`;
+        for (const theme of themes) {
+            info += `  ${theme.technicalName} (${theme.themeId})\n`;
+            for (const op of theme.outputPaths) {
+                info += `    → public/theme/${op.themeHash}/css/all.css\n`;
+            }
         }
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end(info);
+        return;
+    }
 
-        if (url.pathname === '/client.js') {
-            return new Response(CLIENT_SCRIPT, {
-                headers: {
-                    'Content-Type': 'application/javascript',
-                    'Access-Control-Allow-Origin': '*',
-                },
-            });
-        }
-
-        if (url.pathname === '/') {
-            return new Response(
-                `SidworksDevTools — Hot-reload server\n\n` +
-                `Theme hash: ${themeHash}\n` +
-                `Output: public/theme/${themeHash}/css/all.css\n`,
-                { headers: { 'Content-Type': 'text/plain' } },
-            );
-        }
-
-        return new Response('Not found', { status: 404 });
-    },
+    res.writeHead(404);
+    res.end('Not found');
 });
+
+server.listen(HOT_RELOAD_PORT);
 
 // ── Initial compilation ─────────────────────────────────────────────────────
 

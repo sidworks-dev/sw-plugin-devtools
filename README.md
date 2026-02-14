@@ -110,6 +110,19 @@ This will:
 
 The plugin's Twig template automatically injects the hot-reload client script, so CSS changes apply instantly without refreshing the page.
 
+### Storefront Hot Proxy Override
+
+This plugin also ships a standalone copy of the Shopware storefront hot-proxy runtime under:
+
+`custom/plugins/SidworksDevTools/bin/storefront-hot-proxy/`
+
+The project root watcher (`bin/watch-storefront.sh`) automatically uses this runtime when present, so you can keep watcher/performance changes outside `vendor/shopware/*`.
+
+Useful flags for this runtime:
+- `--core-only-hot`: only compile core storefront in hot mode
+- `--skip-postcss`: skip PostCSS step in hot mode
+- `--full-twig-watch`: disable narrow Twig watch mode
+
 ### Template Inspector — Basic Workflow
 
 1. **Enable debug mode** in Shopware (`.env`: `APP_ENV=dev`)

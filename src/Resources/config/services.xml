@@ -24,6 +24,18 @@
             <tag name="kernel.event_subscriber"/>
         </service>
 
+        <!-- Watch Command for SCSS watcher prep -->
+        <service id="Sidworks\DevTools\Command\WatchCommand">
+            <argument type="service" id="Shopware\Storefront\Theme\StorefrontPluginRegistry"/>
+            <argument type="service" id="Shopware\Storefront\Theme\ThemeFileResolver"/>
+            <argument type="service" id="theme.repository"/>
+            <argument type="service" id="Shopware\Storefront\Theme\ConfigLoader\AbstractAvailableThemeProvider"/>
+            <argument type="service" id="Shopware\Storefront\Theme\ThemeFilesystemResolver"/>
+            <argument type="service" id="Shopware\Storefront\Theme\ConfigLoader\StaticFileConfigDumper"/>
+            <argument type="service" id="Shopware\Storefront\Theme\AbstractThemePathBuilder"/>
+            <tag name="console.command"/>
+        </service>
+
         <!-- Controller for Template Search API -->
         <service id="Sidworks\DevTools\Controller\TemplateSearchController" public="true">
             <argument>%kernel.project_dir%</argument>

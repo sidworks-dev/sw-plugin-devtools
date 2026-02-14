@@ -1,0 +1,322 @@
+const os = require('node:os');
+const path = require('node:path');
+
+const {
+    resolveProjectRoot,
+    resolveStorefrontApp,
+    createStorefrontRequire,
+} = require('./runtime-paths');
+
+const storefrontSassDeprecationsList = ['import', 'global-builtin', 'color-functions', 'slash-div', 'legacy-js-api'];
+
+function asBoolean(value, defaultValue) {
+    if (typeof value === 'undefined' || value === '') {
+        return defaultValue;
+    }
+
+    return value !== '0' && value !== 'false';
+}
+
+function toArray(value) {
+    if (Array.isArray(value)) {
+        return value;
+    }
+
+    if (typeof value === 'undefined' || value === null || value === '') {
+        return [];
+    }
+
+    return [value];
+}
+
+function asString(value, defaultValue) {
+    if (typeof value === 'undefined' || value === null || value === '') {
+        return defaultValue;
+    }
+
+    return String(value);
+}
+
+function resolveWebSocketHostname() {
+    const fallbackHost = 'localhost';
+    const sourceUrl = process.env.PROXY_URL || process.env.APP_URL || '';
+
+    if (!sourceUrl) {
+        return fallbackHost;
+    }
+
+    try {
+        return new URL(sourceUrl).hostname;
+    } catch (_error) {
+        return fallbackHost;
+    }
+}
+
+function normalizeLoaderRuleEntry(entry) {
+    if (typeof entry === 'string') {
+        return {
+            loader: entry,
+            options: {},
+        };
+    }
+
+    if (!entry || typeof entry !== 'object') {
+        return entry;
+    }
+
+    return {
+        ...entry,
+        options: {
+            ...(entry.options || {}),
+        },
+    };
+}
+
+function findScssRule(rules) {
+    if (!Array.isArray(rules)) {
+        return null;
+    }
+
+    for (const rule of rules) {
+        if (!rule || typeof rule !== 'object') {
+            continue;
+        }
+
+        if (rule.test instanceof RegExp && rule.test.test('.scss') && Array.isArray(rule.use)) {
+            return rule;
+        }
+
+        if (Array.isArray(rule.oneOf)) {
+            const found = findScssRule(rule.oneOf);
+            if (found) {
+                return found;
+            }
+        }
+
+        if (Array.isArray(rule.rules)) {
+            const found = findScssRule(rule.rules);
+            if (found) {
+                return found;
+            }
+        }
+    }
+
+    return null;
+}
+
+function patchScssRule(scssRule, options) {
+    if (!scssRule || !Array.isArray(scssRule.use)) {
+        return;
+    }
+
+    const patchedUse = [];
+
+    for (const useEntry of scssRule.use) {
+        const normalized = normalizeLoaderRuleEntry(useEntry);
+        const loaderName = typeof normalized?.loader === 'string' ? normalized.loader : '';
+
+        if (options.skipPostCss && loaderName.includes('postcss-loader')) {
+            continue;
+        }
+
+        if (!loaderName) {
+            patchedUse.push(normalized);
+            continue;
+        }
+
+        if (loaderName.includes('css-loader')) {
+            normalized.options.sourceMap = options.scssSourceMapEnabled;
+            if (typeof normalized.options.url === 'undefined') {
+                normalized.options.url = false;
+            }
+        }
+
+        if (loaderName.includes('postcss-loader')) {
+            normalized.options.sourceMap = options.scssSourceMapEnabled;
+            if (!normalized.options.postcssOptions) {
+                normalized.options.postcssOptions = {
+                    config: false,
+                };
+            }
+        }
+
+        if (loaderName.includes('sass-loader')) {
+            const existingSassOptions = normalized.options.sassOptions || {};
+
+            normalized.options.sourceMap = options.scssSourceMapEnabled;
+            normalized.options.implementation = options.sassImplementation;
+            normalized.options.warnRuleAsWarning = false;
+            normalized.options.sassOptions = {
+                ...existingSassOptions,
+                quietDeps: true,
+                silenceDeprecations: options.silenceSassDeprecations ? storefrontSassDeprecationsList : [],
+            };
+        }
+
+        patchedUse.push(normalized);
+    }
+
+    scssRule.use = patchedUse;
+}
+
+function patchWatchFiles(coreConfig, options) {
+    if (!coreConfig.devServer) {
+        return;
+    }
+
+    const defaultIgnored = [
+        '**/.git/**',
+        '**/node_modules/**',
+        '**/public/theme/**',
+        '**/var/cache/**',
+    ];
+
+    if (!coreConfig.devServer.watchFiles) {
+        coreConfig.devServer.watchFiles = {
+            options: {},
+        };
+    }
+
+    const watchFiles = coreConfig.devServer.watchFiles;
+    watchFiles.options = watchFiles.options || {};
+
+    if (options.twigWatchMode === 'narrow') {
+        watchFiles.paths = [
+            'custom/plugins/**/src/Resources/views/**/*.twig',
+            'custom/apps/**/Resources/views/**/*.twig',
+            'src/Resources/views/**/*.twig',
+            'templates/**/*.twig',
+            'vendor/shopware/storefront/Resources/views/**/*.twig',
+        ];
+    }
+
+    const mergedIgnored = [...new Set([...toArray(watchFiles.options.ignored), ...defaultIgnored])];
+    watchFiles.options.ignored = mergedIgnored;
+}
+
+function loadPatchedWebpackConfig(explicitProjectRoot) {
+    const projectRoot = explicitProjectRoot || resolveProjectRoot(__dirname);
+    const storefrontApp = resolveStorefrontApp(projectRoot);
+    const storefrontRequire = createStorefrontRequire(projectRoot);
+    const coreWebpackConfigPath = path.resolve(storefrontApp, 'webpack.config.js');
+
+    const useSassEmbedded = asBoolean(process.env.SHOPWARE_STOREFRONT_USE_SASS_EMBEDDED, true);
+    const devCacheEnabled = asBoolean(process.env.SHOPWARE_STOREFRONT_DEV_CACHE, true);
+    const jsSourceMapEnabled = asBoolean(process.env.SHOPWARE_STOREFRONT_JS_SOURCE_MAP, false);
+    const scssSourceMapEnabled = asBoolean(process.env.SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP, false);
+    const skipPostCss = asBoolean(process.env.SHOPWARE_STOREFRONT_SKIP_POSTCSS, false);
+    const silenceSassDeprecations = asBoolean(process.env.SHOPWARE_STOREFRONT_SASS_SILENCE_DEPRECATIONS, true);
+    const coreOnlyHotMode = asBoolean(process.env.SHOPWARE_STOREFRONT_HOT_CORE_ONLY, false);
+    const twigWatchMode = asString(process.env.SHOPWARE_STOREFRONT_TWIG_WATCH_MODE, 'narrow').toLowerCase();
+
+    if (twigWatchMode === 'narrow') {
+        process.env.SHOPWARE_STOREFRONT_SKIP_EXTENSION_TWIG_WATCH = '1';
+    }
+
+    let sassImplementation;
+    try {
+        sassImplementation = storefrontRequire('sass');
+
+        if (useSassEmbedded) {
+            try {
+                sassImplementation = storefrontRequire('sass-embedded');
+                console.log('[SidworksDevTools] Using sass-embedded in hot mode');
+            } catch (_error) {
+                console.log('[SidworksDevTools] sass-embedded not available, using sass');
+            }
+        }
+    } catch (error) {
+        throw new Error(`Unable to load Sass implementation from storefront app: ${error.message}`);
+    }
+
+    delete require.cache[require.resolve(coreWebpackConfigPath)];
+
+    const previousCwd = process.cwd();
+    let webpackConfig;
+    try {
+        process.chdir(storefrontApp);
+        webpackConfig = require(coreWebpackConfigPath);
+    } finally {
+        process.chdir(previousCwd);
+    }
+    const configArray = Array.isArray(webpackConfig) ? webpackConfig : [webpackConfig];
+    const coreConfig = configArray[0];
+
+    const isHotMode = process.env.MODE === 'hot';
+    if (!isHotMode) {
+        return webpackConfig;
+    }
+
+    coreConfig.devtool = jsSourceMapEnabled ? 'eval-cheap-module-source-map' : false;
+
+    // When this config is required outside the storefront app directory,
+    // Shopware's path.resolve('src') entry can resolve to the project root.
+    // Force the core storefront entry to its absolute path.
+    if (coreConfig.entry && Object.prototype.hasOwnProperty.call(coreConfig.entry, 'storefront')) {
+        coreConfig.entry.storefront = path.resolve(storefrontApp, 'src/main.js');
+    }
+
+    const assetPort = parseInt(process.env.STOREFRONT_ASSETS_PORT || '', 10) || 9999;
+    if (coreConfig.devServer) {
+        const clientConfig = coreConfig.devServer.client || {};
+        const webSocketConfig = clientConfig.webSocketURL || {};
+
+        coreConfig.devServer.client = {
+            ...clientConfig,
+            webSocketURL: {
+                ...webSocketConfig,
+                hostname: resolveWebSocketHostname(),
+                port: assetPort,
+            },
+        };
+        coreConfig.devServer.liveReload = true;
+    }
+
+    if (devCacheEnabled) {
+        coreConfig.cache = {
+            type: 'filesystem',
+            cacheDirectory: path.resolve(projectRoot, 'var/cache/webpack-storefront-hot'),
+            buildDependencies: {
+                config: [coreWebpackConfigPath, __filename],
+            },
+        };
+    }
+
+    patchWatchFiles(coreConfig, {
+        projectRoot,
+        twigWatchMode,
+    });
+
+    const scssRule = findScssRule(coreConfig?.module?.rules);
+    patchScssRule(scssRule, {
+        scssSourceMapEnabled,
+        skipPostCss,
+        silenceSassDeprecations,
+        sassImplementation,
+    });
+
+    const effectiveConfigArray = coreOnlyHotMode ? [coreConfig] : configArray;
+
+    if (coreOnlyHotMode) {
+        console.log('[SidworksDevTools] Core-only hot mode enabled (plugin JS compilers disabled)');
+    }
+
+    const explicitParallelism = parseInt(process.env.SHOPWARE_BUILD_PARALLELISM || '', 10);
+    const detectedCpuCount = (() => {
+        const cpuInfo = os.cpus();
+        if (!cpuInfo || cpuInfo.length === 0) {
+            return 2;
+        }
+
+        return cpuInfo.length;
+    })();
+
+    const defaultParallelism = Math.max(1, detectedCpuCount - 1);
+    effectiveConfigArray.parallelism = Number.isInteger(explicitParallelism) && explicitParallelism > 0
+        ? explicitParallelism
+        : defaultParallelism;
+
+    return effectiveConfigArray;
+}
+
+module.exports = loadPatchedWebpackConfig;
