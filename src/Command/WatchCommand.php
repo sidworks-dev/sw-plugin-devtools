@@ -75,17 +75,7 @@ class WatchCommand extends Command
         $packageManager = $this->selectPackageManager($input, $io);
         $hotEnvironment = $this->buildHotEnvironment($input, $projectRoot);
 
-        $io->writeln('Starting optimized storefront watcher');
-        $io->writeln(\sprintf('  Package manager: %s', $packageManager));
-        $io->writeln(\sprintf('  Storefront app: %s', $storefrontApp));
-        $io->writeln(\sprintf('  Hot proxy runtime: %s', $hotProxyScript));
-        $io->writeln(\sprintf('  Core-only hot mode: %s', $hotEnvironment['SHOPWARE_STOREFRONT_HOT_CORE_ONLY']));
-        $io->writeln(\sprintf('  Twig watch mode: %s', $hotEnvironment['SHOPWARE_STOREFRONT_TWIG_WATCH_MODE']));
-        $io->writeln(\sprintf('  Build parallelism: %s', $hotEnvironment['SHOPWARE_BUILD_PARALLELISM']));
-        $io->writeln(\sprintf('  JS source maps: %s', $hotEnvironment['SHOPWARE_STOREFRONT_JS_SOURCE_MAP']));
-        $io->writeln(\sprintf('  SCSS source maps: %s', $hotEnvironment['SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP']));
-        $io->writeln(\sprintf('  Skip PostCSS: %s', $hotEnvironment['SHOPWARE_STOREFRONT_SKIP_POSTCSS']));
-        $io->writeln(\sprintf('  Use sass-embedded: %s', $hotEnvironment['SHOPWARE_STOREFRONT_USE_SASS_EMBEDDED']));
+        $this->renderStartupOverview($io, $packageManager, $storefrontApp, $hotProxyScript, $hotEnvironment);
 
         if (!$input->getOption('skip-install') && !is_dir($storefrontApp . '/node_modules/webpack-dev-server')) {
             $io->writeln('Installing storefront dependencies');
@@ -149,6 +139,33 @@ class WatchCommand extends Command
         }
 
         return 0;
+    }
+
+    private function renderStartupOverview(
+        SymfonyStyle $io,
+        string $packageManager,
+        string $storefrontApp,
+        string $hotProxyScript,
+        array $hotEnvironment
+    ): void {
+        $io->title('Sidworks Storefront Watcher');
+        $io->section('Runtime');
+        $io->definitionList(
+            ['Package manager' => \sprintf('<info>%s</info>', $packageManager)],
+            ['Storefront app' => \sprintf('<comment>%s</comment>', $storefrontApp)],
+            ['Hot proxy runtime' => \sprintf('<comment>%s</comment>', $hotProxyScript)],
+        );
+
+        $io->section('Build Profile');
+        $io->definitionList(
+            ['Core-only hot mode' => $this->yesNo($hotEnvironment['SHOPWARE_STOREFRONT_HOT_CORE_ONLY'])],
+            ['Twig watch mode' => \sprintf('<info>%s</info>', $hotEnvironment['SHOPWARE_STOREFRONT_TWIG_WATCH_MODE'])],
+            ['Build parallelism' => \sprintf('<info>%s</info>', $hotEnvironment['SHOPWARE_BUILD_PARALLELISM'])],
+            ['JS source maps' => $this->yesNo($hotEnvironment['SHOPWARE_STOREFRONT_JS_SOURCE_MAP'])],
+            ['SCSS source maps' => $this->yesNo($hotEnvironment['SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP'])],
+            ['Skip PostCSS' => $this->yesNo($hotEnvironment['SHOPWARE_STOREFRONT_SKIP_POSTCSS'])],
+            ['Use sass-embedded' => $this->yesNo($hotEnvironment['SHOPWARE_STOREFRONT_USE_SASS_EMBEDDED'])],
+        );
     }
 
     private function runConsoleCommand(array $arguments, string $projectRoot, OutputInterface $output, InputInterface $input): int
@@ -438,5 +455,10 @@ class WatchCommand extends Command
         }
 
         return (string) $value;
+    }
+
+    private function yesNo(string $value): string
+    {
+        return $value === '1' ? '<info>yes</info>' : '<comment>no</comment>';
     }
 }
