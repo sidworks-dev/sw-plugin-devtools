@@ -8,8 +8,17 @@ const {
     createStorefrontRequire,
 } = require('./runtime-paths');
 
+const ANSI = {
+    reset: '\x1b[0m',
+    gray: '\x1b[90m',
+    green: '\x1b[32m',
+    yellow: '\x1b[33m',
+    cyan: '\x1b[36m',
+    magenta: '\x1b[35m',
+};
+
 function createChangeFeedbackWatcher(projectRoot) {
-    const DUPLICATE_LOG_WINDOW_MS = 800;
+    const DUPLICATE_LOG_WINDOW_MS = 2000;
     const rootPath = path.resolve(projectRoot);
     const storefrontApp = resolveStorefrontApp(rootPath);
     const storefrontRequire = createStorefrontRequire(rootPath);
@@ -21,6 +30,28 @@ function createChangeFeedbackWatcher(projectRoot) {
 
     let watchpack = null;
     const recentlyLogged = new Map();
+
+    function hasInteractiveTty() {
+        return Boolean(process.stdout && process.stdout.isTTY);
+    }
+
+    function colorize(text, colorCode) {
+        if (!hasInteractiveTty()) {
+            return text;
+        }
+
+        return `${colorCode}${text}${ANSI.reset}`;
+    }
+
+    function logFileEvent(fileType, eventType, formattedFile, details = '') {
+        const typeColor = fileType === 'twig' ? ANSI.magenta : ANSI.cyan;
+        const eventColor = eventType === 'remove' ? ANSI.yellow : ANSI.green;
+        const typeTag = colorize(`[${fileType.toUpperCase()}]`, typeColor);
+        const eventTag = colorize(`[${eventType.toUpperCase()}]`, eventColor);
+        const suffix = details ? ` ${colorize(details, ANSI.gray)}` : '';
+
+        console.log(`[SidworksDevTools] ${typeTag} ${eventTag} ${formattedFile}${suffix}`);
+    }
 
     function isExistingDirectory(directoryPath) {
         return fs.existsSync(directoryPath) && fs.statSync(directoryPath).isDirectory();
@@ -182,25 +213,26 @@ function createChangeFeedbackWatcher(projectRoot) {
             }
 
             if (disableJsCompilation) {
-                console.log(`[SidworksDevTools] js ${eventType}: ${formattedFile} (JS changed; skipped in --no-js mode)`);
+                logFileEvent('js', eventType, formattedFile, '(skipped: --no-js)');
                 return;
             }
 
             if (coreOnlyHotMode) {
-                console.log(`[SidworksDevTools] js ${eventType}: ${formattedFile} (plugin JS changed; skipped in core-only-hot mode)`);
+                logFileEvent('js', eventType, formattedFile, '(skipped: core-only-hot mode)');
                 return;
             }
 
-            console.log(`[SidworksDevTools] js ${eventType}: ${formattedFile}`);
+            logFileEvent('js', eventType, formattedFile);
             return;
         }
 
         if (fileType === 'twig') {
             if (disableTwigWatch) {
+                logFileEvent('twig', eventType, formattedFile, '(skipped: --no-twig)');
                 return;
             }
 
-            console.log(`[SidworksDevTools] twig ${eventType}: ${formattedFile} (live reload)`);
+            logFileEvent('twig', eventType, formattedFile, '(live reload)');
         }
     }
 
@@ -220,7 +252,6 @@ function createChangeFeedbackWatcher(projectRoot) {
                 '**/.git/**',
                 '**/node_modules/**',
                 '**/var/cache/**',
-                '**/public/_sidworks_hot/**',
                 '**/var/.sidworks-hot/**',
             ],
         });

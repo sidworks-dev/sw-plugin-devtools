@@ -1,6 +1,6 @@
 # Sidworks DevTools for Shopware 6
 
-Never hunt for a Twig file again. Sidworks DevTools reveals the exact template and block behind every Shopware 6 element and lets you jump straight into your IDE with a single click.
+Never hunt for a Twig file again. Sidworks DevTools reveals the exact template and block behind every Shopware 6 element and lets you jump straight into your IDE with a single click. It also includes a optimised storefront watcher.
 
 ![Screenshot](./docs/sw-devtools.png)
 
@@ -21,10 +21,10 @@ Never hunt for a Twig file again. Sidworks DevTools reveals the exact template a
 - **Multi-Editor Support**: Works with PHPStorm and VSCode
 
 ### Optimized Storefront Watcher
-- **Single command flow**: Use `bin/console sidworks:watch` (no shell wrapper required)
-- **Fast hot mode defaults**: Narrow Twig watch scope, filesystem cache, source maps off by default
-- **`sass-embedded` enabled**: Uses embedded Sass compiler in hot mode (falls back to `sass` if unavailable)
-- **Core hot-proxy override**: Keeps hot runtime customizations in plugin space instead of `vendor/shopware/*`
+- **One command start**: `bin/console sidworks:watch-storefront`
+- **Theme picker by default**: Choose theme + domain directly in the terminal
+- **Fast feedback**: Live SCSS updates with readable JS/Twig/SCSS logs
+- **Simple toggles**: `--no-js`, `--no-twig`, `--no-scss`
 
 ## Requirements
 
@@ -95,49 +95,36 @@ The plugin will automatically inject this path into the page, so you don't need 
 
 ## Usage
 
-### Storefront Watcher (`sidworks:watch`)
+### Storefront Watcher (`sidworks:watch-storefront`)
 
 Run from your project root:
 
 ```bash
-bin/console sidworks:watch
+bin/console sidworks:watch-storefront
 ```
 
-Defaults:
-- Fast profile is always on
-- Browser auto-open is off by default
+What this gives you:
+- Interactive theme/domain selection by default
+- Fast defaults for day-to-day storefront work
+- Clear terminal output with `[SCSS]`, `[TWIG]`, and `[JS]` log tags
 
-This command:
-1. Runs in fast mode by default (`skip-postcss`, `scss-engine=sass-cli`)
-2. Ensures storefront dependencies exist
-3. Auto-installs `sass-embedded` in the storefront app when missing
-4. Starts the plugin hot-proxy runtime directly (no `watch.sh`/`watch.mjs` wrapper)
-5. Uses `sass-embedded` by default via `SHOPWARE_STOREFRONT_USE_SASS_EMBEDDED=1`
-
-Only runtime toggles:
+Common toggles:
 
 ```bash
-bin/console sidworks:watch --no-js
-bin/console sidworks:watch --no-twig
-bin/console sidworks:watch --no-scss
+bin/console sidworks:watch-storefront --no-js
+bin/console sidworks:watch-storefront --no-twig
+bin/console sidworks:watch-storefront --no-scss
 ```
 
-### Storefront Hot Proxy Override
+Theme selection shortcuts:
 
-This plugin also ships a standalone copy of the Shopware storefront hot-proxy runtime under:
+```bash
+bin/console sidworks:watch-storefront --theme-name=QsoTheme
+bin/console sidworks:watch-storefront --theme-id=018e94f67ba2719da036725041793f30 --domain-url=https://carclean.ddev.site/nl
+bin/console sidworks:watch-storefront --pick-theme
+```
 
-`<plugin-root>/bin/storefront-hot-proxy/`
-
-`<plugin-root>` can be either:
-- `custom/plugins/SidworksDevTools`
-- `vendor/sidworks/sw-plugin-devtools` (Composer/vendor install)
-
-The project root watcher (`bin/watch-storefront.sh`) automatically uses this runtime when present, so you can keep watcher/performance changes outside `vendor/shopware/*`.
-
-Useful flags for this runtime:
-- `--core-only-hot`: only compile core storefront in hot mode
-- `--skip-postcss`: skip PostCSS step in hot mode
-- `--full-twig-watch`: disable narrow Twig watch mode
+`--domain-url` requires `--theme-id` (or use `--pick-theme` for interactive theme + domain selection).
 
 ### Template Inspector — Basic Workflow
 

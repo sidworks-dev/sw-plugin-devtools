@@ -28,6 +28,28 @@ const shouldOpenBrowser = process.env.SHOPWARE_STOREFRONT_OPEN_BROWSER !== '0';
 const scssEngine = String(process.env.SHOPWARE_STOREFRONT_SCSS_ENGINE || 'webpack').toLowerCase();
 const disableScss = process.env.SHOPWARE_STOREFRONT_DISABLE_SCSS === '1';
 const noOp = () => {};
+const ANSI = {
+    reset: '\x1b[0m',
+    green: '\x1b[32m',
+    yellow: '\x1b[33m',
+    cyan: '\x1b[36m',
+};
+
+function hasInteractiveTty() {
+    return Boolean(process.stdout && process.stdout.isTTY);
+}
+
+function colorize(text, colorCode) {
+    if (!hasInteractiveTty()) {
+        return text;
+    }
+
+    return `${colorCode}${text}${ANSI.reset}`;
+}
+
+function tag(label, colorCode = ANSI.cyan) {
+    return colorize(`[${label}]`, colorCode);
+}
 
 const themeFilesConfigPath = path.resolve(projectRootPath, 'var/theme-files.json');
 let themeFiles = {};
@@ -236,10 +258,8 @@ const server = createLiveReloadServer(sslOptions).catch((e) => {
 });
 
 server.then(() => {
-    console.log('############');
-    console.log(`Default TWIG Storefront: ${appUrlEnv.origin}`);
-    console.log(`Proxy server hot reload: ${proxyUrlEnv.origin}`);
-    console.log('############');
+    console.log(`[SidworksDevTools] ${tag('URL')} storefront: ${colorize(appUrlEnv.origin, ANSI.green)}`);
+    console.log(`[SidworksDevTools] ${tag('URL')} hot proxy: ${colorize(proxyUrlEnv.origin, ANSI.green)}`);
 
     if (proxyUrlEnv.protocol === 'https:' && skipSslCerts === false) {
         try {
@@ -257,15 +277,14 @@ server.then(() => {
         listenProxyServer(httpServer, 'http', skipSslCerts);
     }
 
-    console.log('############');
-    console.log('\n');
+    console.log('');
 
     if (shouldOpenBrowser) {
         openBrowserWithUrl(`${proxyUrlEnv.origin}`);
         return;
     }
 
-    console.log(`Auto-open browser disabled. Open manually: ${proxyUrlEnv.origin}`);
+    console.log(`[SidworksDevTools] ${tag('OPEN', ANSI.yellow)} auto-open disabled. Open manually: ${proxyUrlEnv.origin}`);
 });
 
 if (scssSidecar) {
@@ -387,10 +406,10 @@ function listenProxyServer(server, protocol, skipSslMessage = false) {
 
     server.listen(proxyPort, () => {
         if (protocol === 'https') {
-            console.log('Proxy uses the https schema, with ssl certificate files.');
+            console.log(`[SidworksDevTools] ${tag('PROXY')} using HTTPS with SSL certificate files.`);
             return;
         }
 
-        console.log(`Proxy uses the http schema${skipSslMessage ? ' (SSL certificates are skipped).' : '.'}`);
+        console.log(`[SidworksDevTools] ${tag('PROXY')} using HTTP${skipSslMessage ? ' (SSL certificates are skipped).' : '.'}`);
     });
 }

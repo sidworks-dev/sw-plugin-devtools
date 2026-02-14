@@ -11,7 +11,7 @@ use Symfony\Component\Console\Style\SymfonyStyle;
 use Symfony\Component\Process\Process;
 
 #[AsCommand(
-    name: 'sidworks:watch',
+    name: 'sidworks:watch-storefront',
     description: 'Optimized storefront watcher without shell wrapper',
 )]
 class WatchCommand extends Command
@@ -21,7 +21,11 @@ class WatchCommand extends Command
         $this
             ->addOption('no-js', null, InputOption::VALUE_NONE, 'Disable JS compilation (core + plugins)')
             ->addOption('no-twig', null, InputOption::VALUE_NONE, 'Disable Twig watch/live reload feedback')
-            ->addOption('no-scss', null, InputOption::VALUE_NONE, 'Disable SCSS compilation');
+            ->addOption('no-scss', null, InputOption::VALUE_NONE, 'Disable SCSS compilation')
+            ->addOption('theme-name', null, InputOption::VALUE_REQUIRED, 'Technical theme name passed to theme:dump')
+            ->addOption('theme-id', null, InputOption::VALUE_REQUIRED, 'Theme ID passed to theme:dump')
+            ->addOption('domain-url', null, InputOption::VALUE_REQUIRED, 'Sales channel domain URL passed to theme:dump')
+            ->addOption('pick-theme', null, InputOption::VALUE_NONE, 'Force interactive theme:dump theme/domain picker');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -52,7 +56,7 @@ class WatchCommand extends Command
 
         $nodeBinary = $this->resolveBinary('node');
         if ($nodeBinary === null) {
-            $io->error('Node.js is required to run sidworks:watch');
+            $io->error('Node.js is required to run sidworks:watch-storefront');
 
             return self::FAILURE;
         }
@@ -62,8 +66,39 @@ class WatchCommand extends Command
         $disableJs = (bool) $input->getOption('no-js');
         $disableTwig = (bool) $input->getOption('no-twig');
         $disableScss = (bool) $input->getOption('no-scss');
+        $themeName = $this->normalizeOptionalString($input->getOption('theme-name'));
+        $themeId = $this->normalizeOptionalString($input->getOption('theme-id'));
+        $domainUrl = $this->normalizeOptionalString($input->getOption('domain-url'));
+        $pickThemeOption = (bool) $input->getOption('pick-theme');
+        $canRunThemePicker = $input->isInteractive() && Process::isTtySupported();
+        $hasExplicitThemeSelection = $themeName !== '' || $themeId !== '' || $domainUrl !== '';
+        $pickTheme = $pickThemeOption || (!$hasExplicitThemeSelection && $canRunThemePicker);
         $openBrowser = false;
         $scssEngine = $this->resolveScssEngine();
+
+        if ($themeName !== '' && $themeId !== '') {
+            $io->error('Use either --theme-name or --theme-id (not both).');
+
+            return self::FAILURE;
+        }
+
+        if ($domainUrl !== '' && $themeId === '') {
+            $io->error('--domain-url requires --theme-id. Use --pick-theme for interactive theme/domain selection.');
+
+            return self::FAILURE;
+        }
+
+        if ($pickThemeOption && ($themeName !== '' || $themeId !== '' || $domainUrl !== '')) {
+            $io->error('--pick-theme cannot be combined with --theme-name, --theme-id, or --domain-url.');
+
+            return self::FAILURE;
+        }
+
+        if ($pickThemeOption && !$canRunThemePicker) {
+            $io->error('--pick-theme requires an interactive TTY terminal.');
+
+            return self::FAILURE;
+        }
 
         if (!\in_array($scssEngine, ['webpack', 'sass-cli'], true)) {
             $io->error('Invalid SHOPWARE_STOREFRONT_SCSS_ENGINE value. Use "webpack" or "sass-cli".');
@@ -117,7 +152,15 @@ class WatchCommand extends Command
             }
         }
 
-        $prepExitCode = $this->runPrepCommands($output, $projectRoot);
+        $prepExitCode = $this->runPrepCommands(
+            $output,
+            $input,
+            $projectRoot,
+            $themeName,
+            $themeId,
+            $domainUrl,
+            $pickTheme
+        );
         if ($prepExitCode !== 0) {
             return $prepExitCode;
         }
@@ -135,15 +178,61 @@ class WatchCommand extends Command
 
     private function runPrepCommands(
         OutputInterface $output,
-        string $projectRoot
+        InputInterface $input,
+        string $projectRoot,
+        string $themeName,
+        string $themeId,
+        string $domainUrl,
+        bool $pickTheme
     ): int
     {
-        $skipThemeDump = is_file($projectRoot . '/var/theme-files.json');
-        if (!$skipThemeDump) {
-            return $this->runConsoleCommand(['theme:dump'], $projectRoot, $output);
+        $hasThemeSelection = $themeName !== '' || $themeId !== '' || $domainUrl !== '' || $pickTheme;
+        $skipThemeDump = is_file($projectRoot . '/var/theme-files.json') && !$hasThemeSelection;
+        if ($skipThemeDump) {
+            return 0;
         }
 
-        return 0;
+        $themeDumpArguments = ['theme:dump'];
+        if ($themeName !== '') {
+            $themeDumpArguments[] = '--theme-name=' . $themeName;
+        }
+
+        if ($themeId !== '') {
+            $themeDumpArguments[] = $themeId;
+        }
+
+        if ($domainUrl !== '') {
+            $themeDumpArguments[] = $domainUrl;
+        }
+
+        return $this->runConsoleCommand(
+            $themeDumpArguments,
+            $projectRoot,
+            $output,
+            $input,
+            !$pickTheme
+        );
+    }
+
+    private function runConsoleCommand(
+        array $arguments,
+        string $projectRoot,
+        OutputInterface $output,
+        InputInterface $input,
+        bool $nonInteractive = true
+    ): int
+    {
+        if (
+            $nonInteractive
+            && !\in_array('--no-interaction', $arguments, true)
+            && !\in_array('-n', $arguments, true)
+        ) {
+            $arguments[] = '--no-interaction';
+        }
+
+        $process = new Process([PHP_BINARY, $projectRoot . '/bin/console', ...$arguments], $projectRoot, null, null, null);
+
+        return $this->runProcess($process, $output, $input);
     }
 
     private function renderStartupOverview(
@@ -184,16 +273,6 @@ class WatchCommand extends Command
             ['Use sass-embedded' => $this->yesNo($hotEnvironment['SHOPWARE_STOREFRONT_USE_SASS_EMBEDDED'])],
             ['Auto-open browser' => $this->yesNo($hotEnvironment['SHOPWARE_STOREFRONT_OPEN_BROWSER'])],
         );
-    }
-
-    private function runConsoleCommand(array $arguments, string $projectRoot, OutputInterface $output): int
-    {
-        if (!\in_array('--no-interaction', $arguments, true) && !\in_array('-n', $arguments, true)) {
-            $arguments[] = '--no-interaction';
-        }
-
-        $process = new Process([PHP_BINARY, $projectRoot . '/bin/console', ...$arguments], $projectRoot, null, null, null);
-        return $this->runProcessWithoutInput($process, $output);
     }
 
     private function runPackageInstall(
@@ -312,17 +391,6 @@ class WatchCommand extends Command
 
             return $process->getExitCode() ?? 0;
         }
-
-        $process->run(static function (string $type, string $buffer) use ($output): void {
-            $output->write($buffer);
-        });
-
-        return $process->getExitCode() ?? 0;
-    }
-
-    private function runProcessWithoutInput(Process $process, OutputInterface $output): int
-    {
-        $process->setTimeout(null);
 
         $process->run(static function (string $type, string $buffer) use ($output): void {
             $output->write($buffer);
@@ -489,7 +557,7 @@ class WatchCommand extends Command
             $rootDirectory = \dirname($directory);
         }
 
-        throw new \RuntimeException('Could not resolve project root for sidworks:watch');
+        throw new \RuntimeException('Could not resolve project root for sidworks:watch-storefront');
     }
 
     private function resolveBinary(string $binary): ?string
@@ -557,5 +625,14 @@ class WatchCommand extends Command
         }
 
         return $normalizedPath;
+    }
+
+    private function normalizeOptionalString(mixed $value): string
+    {
+        if (!\is_string($value)) {
+            return '';
+        }
+
+        return trim($value);
     }
 }

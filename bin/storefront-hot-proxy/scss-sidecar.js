@@ -17,6 +17,14 @@ const HOT_CSS_ROUTE = `${HOT_CSS_BASE_PATH}/${HOT_CSS_FILE_NAME}`;
 const HOT_CSS_EVENTS_ROUTE = `${HOT_CSS_BASE_PATH}/events`;
 
 const sassDeprecations = ['import', 'global-builtin', 'color-functions', 'slash-div', 'legacy-js-api'];
+const ANSI = {
+    reset: '\x1b[0m',
+    gray: '\x1b[90m',
+    red: '\x1b[31m',
+    green: '\x1b[32m',
+    yellow: '\x1b[33m',
+    cyan: '\x1b[36m',
+};
 
 function asString(value, defaultValue) {
     if (typeof value === 'undefined' || value === null || value === '') {
@@ -140,7 +148,7 @@ function createScssSidecar(projectRoot) {
     const featureConfigPath = path.resolve(rootPath, 'var/config_js_features.json');
     const themeConfigPath = path.resolve(rootPath, 'files/theme-config/index.json');
     const fallbackThemeVariablesPath = path.resolve(rootPath, 'var/theme-variables.scss');
-    const cssOutputPath = path.resolve(rootPath, 'public', HOT_CSS_BASE_PATH.replace(/^\//, ''), HOT_CSS_FILE_NAME);
+    const cssOutputPath = path.resolve(generatedEntryDirectoryPath, HOT_CSS_FILE_NAME);
 
     const state = {
         subscribers: new Set(),
@@ -153,10 +161,6 @@ function createScssSidecar(projectRoot) {
         aliasMap: {},
         activeEntryPath: null,
         loggedGeneratedEntryInfo: false,
-        spinnerInterval: null,
-        spinnerFrame: 0,
-        spinnerReason: '',
-        spinnerStartedAt: 0,
         pendingChangedFiles: new Set(),
         pendingTriggerType: '',
     };
@@ -165,44 +169,38 @@ function createScssSidecar(projectRoot) {
         return Boolean(process.stdout && process.stdout.isTTY);
     }
 
-    function startCompileIndicator(reason) {
+    function colorize(text, colorCode) {
         if (!hasInteractiveTty()) {
-            console.log(`[SidworksDevTools] SCSS sidecar compiling (${reason})...`);
-            return;
+            return text;
         }
 
-        if (state.spinnerInterval) {
-            return;
-        }
+        return `${colorCode}${text}${ANSI.reset}`;
+    }
 
-        const frames = ['-', '\\', '|', '/'];
-        state.spinnerReason = reason;
-        state.spinnerFrame = 0;
-        state.spinnerStartedAt = Date.now();
-        state.spinnerInterval = setInterval(() => {
-            const frame = frames[state.spinnerFrame % frames.length];
-            state.spinnerFrame += 1;
-            const elapsed = Date.now() - state.spinnerStartedAt;
-            process.stdout.write(`\r[SidworksDevTools] SCSS sidecar compiling (${state.spinnerReason}) ${frame} ${elapsed}ms`);
-        }, 120);
+    function logScss(message) {
+        const tag = colorize('[SCSS]', ANSI.cyan);
+        console.log(`[SidworksDevTools] ${tag} ${message}`);
+    }
+
+    function logScssError(message) {
+        const tag = colorize('[SCSS]', ANSI.cyan);
+        console.error(`[SidworksDevTools] ${tag} ${message}`);
+    }
+
+    function startCompileIndicator(reason) {
+        const status = colorize('[RUN]', ANSI.yellow);
+        logScss(`${status} compiling (${reason})`);
     }
 
     function stopCompileIndicator(success, reason, duration, errorMessage) {
-        if (state.spinnerInterval) {
-            clearInterval(state.spinnerInterval);
-            state.spinnerInterval = null;
-        }
-
-        if (hasInteractiveTty()) {
-            process.stdout.write('\r\x1b[2K');
-        }
-
         if (success) {
-            console.log(`[SidworksDevTools] SCSS sidecar compiled (${reason}) in ${duration}ms`);
+            const status = colorize('[OK]', ANSI.green);
+            logScss(`${status} compiled (${reason}) in ${duration}ms`);
             return;
         }
 
-        console.error(`[SidworksDevTools] SCSS sidecar compile failed (${reason}) after ${duration}ms: ${errorMessage}`);
+        const status = colorize('[ERR]', ANSI.red);
+        logScssError(`${status} compile failed (${reason}) after ${duration}ms: ${errorMessage}`);
     }
 
     function formatChangedFilePath(filePath) {
@@ -482,7 +480,6 @@ function createScssSidecar(projectRoot) {
             ignored: [
                 '**/.git/**',
                 '**/node_modules/**',
-                '**/public/_sidworks_hot/**',
                 '**/var/.sidworks-hot/**',
                 '**/var/cache/**',
             ],
@@ -539,8 +536,8 @@ function createScssSidecar(projectRoot) {
                 const queuedFiles = summarizeChangedFiles([...state.pendingChangedFiles]);
                 console.log(
                     queuedFiles
-                        ? `[SidworksDevTools] SCSS sidecar change queued while compile is running (${queuedFiles})`
-                        : '[SidworksDevTools] SCSS sidecar change queued while compile is running',
+                        ? `[SidworksDevTools] ${colorize('[SCSS]', ANSI.cyan)} ${colorize('[WAIT]', ANSI.yellow)} change queued while compile is running (${queuedFiles})`
+                        : `[SidworksDevTools] ${colorize('[SCSS]', ANSI.cyan)} ${colorize('[WAIT]', ANSI.yellow)} change queued while compile is running`,
                 );
             }
             state.compileQueued = true;
@@ -731,11 +728,6 @@ function createScssSidecar(projectRoot) {
     }
 
     function close() {
-        if (state.spinnerInterval) {
-            clearInterval(state.spinnerInterval);
-            state.spinnerInterval = null;
-        }
-
         if (state.compileTimer) {
             clearTimeout(state.compileTimer);
             state.compileTimer = null;

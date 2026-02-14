@@ -314,16 +314,14 @@ function loadPatchedWebpackConfig(explicitProjectRoot) {
     }
 
     if (useScssSidecar) {
-        const webpackLib = storefrontRequire('webpack');
-        coreConfig.plugins = coreConfig.plugins || [];
-        coreConfig.plugins.push(
-            new webpackLib.NormalModuleReplacementPlugin(/theme-entry\.scss$/, path.resolve(__dirname, 'empty-theme-entry.js')),
-        );
-        console.log('[SidworksDevTools] SCSS sidecar mode enabled (theme-entry.scss removed from webpack)');
+        if (coreConfig.entry && Object.prototype.hasOwnProperty.call(coreConfig.entry, 'hot-reloading')) {
+            delete coreConfig.entry['hot-reloading'];
+        }
+        console.log('[SidworksDevTools] SCSS sidecar mode enabled (webpack SCSS entry disabled)');
     }
 
     if (disableTwig && coreConfig.devServer) {
-        coreConfig.devServer.watchFiles = false;
+        delete coreConfig.devServer.watchFiles;
         console.log('[SidworksDevTools] Twig watch disabled (--no-twig)');
     }
 
