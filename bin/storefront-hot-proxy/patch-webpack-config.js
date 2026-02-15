@@ -220,6 +220,47 @@ function patchWatchFiles(coreConfig, options) {
     watchFiles.options.ignored = mergedIgnored;
 }
 
+function patchScssSidecarWatchBehavior(configArray) {
+    const scssIgnoredPatterns = ['**/*.scss', '**/*.sass'];
+
+    for (const config of configArray) {
+        if (!config || typeof config !== 'object') {
+            continue;
+        }
+
+        config.watchOptions = config.watchOptions || {};
+        config.watchOptions.ignored = [...new Set([
+            ...toArray(config.watchOptions.ignored),
+            ...scssIgnoredPatterns,
+        ])];
+
+        if (!config.devServer || !config.devServer.watchFiles || typeof config.devServer.watchFiles !== 'object' || Array.isArray(config.devServer.watchFiles)) {
+            continue;
+        }
+
+        const watchFiles = config.devServer.watchFiles;
+        const watchFilesOptions = watchFiles.options || {};
+        watchFilesOptions.ignored = [...new Set([
+            ...toArray(watchFilesOptions.ignored),
+            ...scssIgnoredPatterns,
+        ])];
+        watchFiles.options = watchFilesOptions;
+    }
+}
+
+function stripWebpackBarPlugins(configArray) {
+    for (const config of configArray) {
+        if (!config || typeof config !== 'object' || !Array.isArray(config.plugins)) {
+            continue;
+        }
+
+        config.plugins = config.plugins.filter((plugin) => {
+            const constructorName = String(plugin?.constructor?.name || '');
+            return !/webpackbar/i.test(constructorName);
+        });
+    }
+}
+
 function loadPatchedWebpackConfig(explicitProjectRoot) {
     const projectRoot = explicitProjectRoot || resolveProjectRoot(__dirname);
     const storefrontApp = resolveStorefrontApp(projectRoot);
@@ -236,6 +277,7 @@ function loadPatchedWebpackConfig(explicitProjectRoot) {
     const disableJs = asBoolean(process.env.SHOPWARE_STOREFRONT_DISABLE_JS, false);
     const disableTwig = asBoolean(process.env.SHOPWARE_STOREFRONT_DISABLE_TWIG, false);
     const disableScss = asBoolean(process.env.SHOPWARE_STOREFRONT_DISABLE_SCSS, false);
+    const verboseWebpackOutput = asBoolean(process.env.SHOPWARE_STOREFRONT_VERBOSE_WEBPACK, false);
     const coreOnlyHotMode = asBoolean(process.env.SHOPWARE_STOREFRONT_HOT_CORE_ONLY, false) || disableJs;
     const scssEngine = asString(process.env.SHOPWARE_STOREFRONT_SCSS_ENGINE, 'webpack').toLowerCase();
     const useScssSidecar = !disableScss && scssEngine === 'sass-cli';
@@ -318,6 +360,8 @@ function loadPatchedWebpackConfig(explicitProjectRoot) {
             delete coreConfig.entry['hot-reloading'];
         }
         console.log('[SidworksDevTools] SCSS sidecar mode enabled (webpack SCSS entry disabled)');
+        patchScssSidecarWatchBehavior(configArray);
+        console.log('[SidworksDevTools] SCSS sidecar mode: webpack ignores SCSS/SASS change events (JS rebuilds only on JS changes)');
     }
 
     if (disableTwig && coreConfig.devServer) {
@@ -373,6 +417,22 @@ function loadPatchedWebpackConfig(explicitProjectRoot) {
 
     if (coreOnlyHotMode) {
         console.log('[SidworksDevTools] Core-only hot mode enabled (plugin JS compilers disabled)');
+    }
+
+    if (!verboseWebpackOutput) {
+        stripWebpackBarPlugins(effectiveConfigArray);
+
+        for (const config of effectiveConfigArray) {
+            if (!config || typeof config !== 'object') {
+                continue;
+            }
+
+            config.stats = 'errors-only';
+            config.infrastructureLogging = {
+                ...(config.infrastructureLogging || {}),
+                level: 'error',
+            };
+        }
     }
 
     const explicitParallelism = parseInt(process.env.SHOPWARE_BUILD_PARALLELISM || '', 10);

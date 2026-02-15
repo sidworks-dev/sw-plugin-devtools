@@ -10,26 +10,33 @@ const {
 
 const ANSI = {
     reset: '\x1b[0m',
+    red: '\x1b[31m',
     gray: '\x1b[90m',
     green: '\x1b[32m',
     yellow: '\x1b[33m',
     cyan: '\x1b[36m',
-    magenta: '\x1b[35m',
 };
 
 function createChangeFeedbackWatcher(projectRoot) {
     const DUPLICATE_LOG_WINDOW_MS = 2000;
+    const TWIG_DEBOUNCE_MS = 90;
     const rootPath = path.resolve(projectRoot);
     const storefrontApp = resolveStorefrontApp(rootPath);
     const storefrontRequire = createStorefrontRequire(rootPath);
     const Watchpack = storefrontRequire('watchpack');
     const coreOnlyHotMode = process.env.SHOPWARE_STOREFRONT_HOT_CORE_ONLY === '1';
     const disableJsCompilation = process.env.SHOPWARE_STOREFRONT_DISABLE_JS === '1';
+    const jsCompileFeedbackEnabled = process.env.SHOPWARE_STOREFRONT_JS_COMPILE_FEEDBACK !== '0';
     const disableTwigWatch = process.env.SHOPWARE_STOREFRONT_DISABLE_TWIG === '1';
-    const coreStorefrontJsRoot = path.resolve(storefrontApp, 'src');
 
     let watchpack = null;
     const recentlyLogged = new Map();
+    const twigState = {
+        timer: null,
+        waitLogged: false,
+        pendingEventType: '',
+        pendingFiles: new Set(),
+    };
 
     function hasInteractiveTty() {
         return Boolean(process.stdout && process.stdout.isTTY);
@@ -44,13 +51,31 @@ function createChangeFeedbackWatcher(projectRoot) {
     }
 
     function logFileEvent(fileType, eventType, formattedFile, details = '') {
-        const typeColor = fileType === 'twig' ? ANSI.magenta : ANSI.cyan;
+        const typeColor = ANSI.cyan;
         const eventColor = eventType === 'remove' ? ANSI.yellow : ANSI.green;
         const typeTag = colorize(`[${fileType.toUpperCase()}]`, typeColor);
         const eventTag = colorize(`[${eventType.toUpperCase()}]`, eventColor);
         const suffix = details ? ` ${colorize(details, ANSI.gray)}` : '';
 
         console.log(`[SidworksDevTools] ${typeTag} ${eventTag} ${formattedFile}${suffix}`);
+    }
+
+    function logTwigStatus(status, message, asError = false) {
+        const typeTag = colorize('[TWIG]', ANSI.cyan);
+        const statusColor = status === 'OK'
+            ? ANSI.green
+            : status === 'ERR'
+                ? ANSI.red
+                : ANSI.yellow;
+        const statusTag = colorize(`[${status}]`, statusColor);
+        const line = `[SidworksDevTools] ${typeTag} ${statusTag} ${message}`;
+
+        if (asError) {
+            console.error(line);
+            return;
+        }
+
+        console.log(line);
     }
 
     function isExistingDirectory(directoryPath) {
@@ -190,9 +215,67 @@ function createChangeFeedbackWatcher(projectRoot) {
         return now - previous < DUPLICATE_LOG_WINDOW_MS;
     }
 
-    function isCoreStorefrontJsFile(filePath) {
-        const normalizedFile = path.resolve(filePath);
-        return normalizedFile.startsWith(coreStorefrontJsRoot + path.sep);
+    function summarizeFiles(files) {
+        const uniqueFiles = [...new Set((files || []).filter((file) => typeof file === 'string' && file !== ''))];
+        if (uniqueFiles.length === 0) {
+            return '';
+        }
+
+        if (uniqueFiles.length <= 3) {
+            return uniqueFiles.join(', ');
+        }
+
+        return `${uniqueFiles.slice(0, 3).join(', ')} +${uniqueFiles.length - 3} more`;
+    }
+
+    function rememberTwigPending(eventType, formattedFile) {
+        if (typeof eventType === 'string' && eventType !== '') {
+            twigState.pendingEventType = eventType;
+        }
+
+        if (typeof formattedFile === 'string' && formattedFile !== '') {
+            twigState.pendingFiles.add(formattedFile);
+        }
+    }
+
+    function formatTwigReasonLabel() {
+        const trigger = twigState.pendingEventType || 'change';
+        const fileSummary = summarizeFiles([...twigState.pendingFiles]);
+        return fileSummary ? `${trigger}: ${fileSummary}` : trigger;
+    }
+
+    function flushTwigReloadFeedback() {
+        const reasonLabel = formatTwigReasonLabel();
+        const startedAt = Date.now();
+
+        twigState.pendingEventType = '';
+        twigState.pendingFiles.clear();
+        twigState.waitLogged = false;
+
+        logTwigStatus('RUN', `reloading (${reasonLabel})`);
+        logTwigStatus('OK', `reloaded (${reasonLabel}) in ${Date.now() - startedAt}ms`);
+    }
+
+    function scheduleTwigReloadFeedback(eventType, formattedFile) {
+        rememberTwigPending(eventType, formattedFile);
+
+        if (twigState.timer) {
+            if (!twigState.waitLogged) {
+                const queuedFiles = summarizeFiles([...twigState.pendingFiles]);
+                if (queuedFiles) {
+                    logTwigStatus('WAIT', `change queued while reload is running (${queuedFiles})`);
+                } else {
+                    logTwigStatus('WAIT', 'change queued while reload is running');
+                }
+                twigState.waitLogged = true;
+            }
+            return;
+        }
+
+        twigState.timer = setTimeout(() => {
+            twigState.timer = null;
+            flushTwigReloadFeedback();
+        }, TWIG_DEBOUNCE_MS);
     }
 
     function handleFileEvent(eventType, absoluteFilePath) {
@@ -202,13 +285,12 @@ function createChangeFeedbackWatcher(projectRoot) {
         }
 
         const formattedFile = formatFilePath(absoluteFilePath);
-        if (!formattedFile || shouldSkipDuplicate(eventType, formattedFile)) {
+        if (!formattedFile) {
             return;
         }
 
         if (fileType === 'js') {
-            if (isCoreStorefrontJsFile(absoluteFilePath) && !disableJsCompilation) {
-                // Core storefront JS is already logged via webpack compiler hooks.
+            if (shouldSkipDuplicate(eventType, formattedFile)) {
                 return;
             }
 
@@ -222,17 +304,25 @@ function createChangeFeedbackWatcher(projectRoot) {
                 return;
             }
 
+            if (jsCompileFeedbackEnabled) {
+                return;
+            }
+
             logFileEvent('js', eventType, formattedFile);
             return;
         }
 
         if (fileType === 'twig') {
             if (disableTwigWatch) {
+                if (shouldSkipDuplicate(eventType, formattedFile)) {
+                    return;
+                }
+
                 logFileEvent('twig', eventType, formattedFile, '(skipped: --no-twig)');
                 return;
             }
 
-            logFileEvent('twig', eventType, formattedFile, '(live reload)');
+            scheduleTwigReloadFeedback(eventType, formattedFile);
         }
     }
 
@@ -263,6 +353,11 @@ function createChangeFeedbackWatcher(projectRoot) {
     }
 
     function close() {
+        if (twigState.timer) {
+            clearTimeout(twigState.timer);
+            twigState.timer = null;
+        }
+
         if (watchpack) {
             watchpack.close();
             watchpack = null;
