@@ -248,6 +248,55 @@ function patchScssSidecarWatchBehavior(configArray) {
     }
 }
 
+function walkRules(rules, callback) {
+    if (!Array.isArray(rules)) {
+        return;
+    }
+
+    for (const rule of rules) {
+        if (!rule || typeof rule !== 'object') {
+            continue;
+        }
+
+        callback(rule);
+
+        if (Array.isArray(rule.oneOf)) {
+            walkRules(rule.oneOf, callback);
+        }
+
+        if (Array.isArray(rule.rules)) {
+            walkRules(rule.rules, callback);
+        }
+    }
+}
+
+function isScssOrSassRule(rule) {
+    return rule.test instanceof RegExp
+        && (rule.test.test('.scss') || rule.test.test('.sass'));
+}
+
+function patchScssRulesToNoop(configArray) {
+    const noopScssLoaderPath = path.resolve(__dirname, 'noop-scss-loader.js');
+
+    for (const config of configArray) {
+        if (!config || typeof config !== 'object') {
+            continue;
+        }
+
+        walkRules(config?.module?.rules, (rule) => {
+            if (!isScssOrSassRule(rule)) {
+                return;
+            }
+
+            rule.use = [
+                {
+                    loader: noopScssLoaderPath,
+                },
+            ];
+        });
+    }
+}
+
 function stripWebpackBarPlugins(configArray) {
     for (const config of configArray) {
         if (!config || typeof config !== 'object' || !Array.isArray(config.plugins)) {
@@ -361,6 +410,8 @@ function loadPatchedWebpackConfig(explicitProjectRoot) {
         }
         console.log('[SidworksDevTools] SCSS sidecar mode enabled (webpack SCSS entry disabled)');
         patchScssSidecarWatchBehavior(configArray);
+        patchScssRulesToNoop(configArray);
+        console.log('[SidworksDevTools] SCSS sidecar mode: webpack SCSS imports disabled (handled by sidecar)');
         console.log('[SidworksDevTools] SCSS sidecar mode: webpack ignores SCSS/SASS change events (JS rebuilds only on JS changes)');
     }
 
