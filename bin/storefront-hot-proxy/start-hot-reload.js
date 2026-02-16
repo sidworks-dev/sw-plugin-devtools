@@ -13,14 +13,15 @@ const {
     resolveProjectRoot,
     createStorefrontRequire,
 } = require('./runtime-paths');
+const { ANSI, colorize, tag } = require('./utils');
 
 const projectRootPath = resolveProjectRoot(__dirname);
 const storefrontRequire = createStorefrontRequire(projectRootPath);
 const { createProxyMiddleware } = storefrontRequire('http-proxy-middleware');
 
-// Match core `npm run hot-proxy` behavior.
 process.env.NODE_ENV = process.env.NODE_ENV || 'development';
 process.env.MODE = process.env.MODE || 'hot';
+process.noDeprecation = true;
 
 const proxyPort = Number(process.env.STOREFRONT_PROXY_PORT) || 9998;
 const assetPort = Number(process.env.STOREFRONT_ASSETS_PORT) || 9999;
@@ -28,28 +29,6 @@ const shouldOpenBrowser = process.env.SHOPWARE_STOREFRONT_OPEN_BROWSER !== '0';
 const scssEngine = String(process.env.SHOPWARE_STOREFRONT_SCSS_ENGINE || 'webpack').toLowerCase();
 const disableScss = process.env.SHOPWARE_STOREFRONT_DISABLE_SCSS === '1';
 const noOp = () => {};
-const ANSI = {
-    reset: '\x1b[0m',
-    green: '\x1b[32m',
-    yellow: '\x1b[33m',
-    cyan: '\x1b[36m',
-};
-
-function hasInteractiveTty() {
-    return Boolean(process.stdout && process.stdout.isTTY);
-}
-
-function colorize(text, colorCode) {
-    if (!hasInteractiveTty()) {
-        return text;
-    }
-
-    return `${colorCode}${text}${ANSI.reset}`;
-}
-
-function tag(label, colorCode = ANSI.cyan) {
-    return colorize(`[${label}]`, colorCode);
-}
 
 const themeFilesConfigPath = path.resolve(projectRootPath, 'var/theme-files.json');
 let themeFiles = {};
@@ -124,8 +103,6 @@ const baseProxyOptions = {
 let scssSidecar = null;
 if (!disableScss && scssEngine === 'sass-cli') {
     scssSidecar = createScssSidecar(projectRootPath);
-} else if (disableScss) {
-    console.log('[SidworksDevTools] SCSS sidecar disabled (--no-scss)');
 }
 
 const changeFeedbackWatcher = createChangeFeedbackWatcher(projectRootPath);
@@ -241,9 +218,7 @@ const proxy = (req, res) => {
 };
 
 if (appUrlEnv.protocol === 'https:' && !sslFilesFound) {
-    console.error('Could not find the key and certificate files.');
-    console.error('Make sure that the environment variables STOREFRONT_HTTPS_KEY_FILE and STOREFRONT_HTTPS_CERTIFICATE_FILE are set correctly.');
-    console.error('If you use a TLS proxy (like in DDEV Shopware 6 setup), you can ignore this message.');
+    console.warn(`[SidworksDevTools] ${tag('SSL', ANSI.yellow)} No certificate files found. Set STOREFRONT_HTTPS_KEY_FILE / STOREFRONT_HTTPS_CERTIFICATE_FILE or ignore if using a TLS proxy (DDEV).`);
 }
 
 const sslOptions = proxyUrlEnv.protocol === 'https:' && skipSslCerts === false ? {
@@ -257,78 +232,62 @@ const server = createLiveReloadServer(sslOptions).catch((e) => {
     return createLiveReloadServer({});
 });
 
-server.then(() => {
-    console.log(`[SidworksDevTools] ${tag('URL')} storefront: ${colorize(appUrlEnv.origin, ANSI.green)}`);
-    console.log(`[SidworksDevTools] ${tag('URL')} hot proxy: ${colorize(proxyUrlEnv.origin, ANSI.green)}`);
+if (scssSidecar) {
+    scssSidecar.start().catch((error) => {
+        console.error(`[SidworksDevTools] ${tag('SCSS', ANSI.red)} Failed to start sidecar: ${error.message}`);
+    });
+}
 
+changeFeedbackWatcher.start();
+
+server.then(() => {
     if (proxyUrlEnv.protocol === 'https:' && skipSslCerts === false) {
         try {
             const httpsServer = nodeServerHttps.createServer(sslOptions, proxy);
             listenProxyServer(httpsServer, 'https');
         } catch (e) {
             console.error(e);
-            console.error('Could not start the proxy server with the provided certificate files, falling back to http server.');
+            console.error('Could not start proxy with certificates, falling back to HTTP.');
             proxyUrlEnv.protocol = 'http:';
         }
     }
 
     if (proxyUrlEnv.protocol === 'http:' || skipSslCerts === true) {
         const httpServer = nodeServerHttp.createServer(proxy);
-        listenProxyServer(httpServer, 'http', skipSslCerts);
+        listenProxyServer(httpServer, 'http');
     }
 
+    const protocol = proxyUrlEnv.protocol === 'https:' ? 'HTTPS' : 'HTTP';
+    console.log('');
+    console.log(`[SidworksDevTools] ${colorize('Ready', ANSI.green)} (${protocol})`);
+    console.log('');
+    console.log(`  Storefront  ${colorize(appUrlEnv.origin, ANSI.cyan)}`);
+    console.log(`  Hot proxy   ${colorize(proxyUrlEnv.origin, ANSI.green)}`);
     console.log('');
 
     if (shouldOpenBrowser) {
         openBrowserWithUrl(`${proxyUrlEnv.origin}`);
-        return;
     }
-
-    console.log(`[SidworksDevTools] ${tag('OPEN', ANSI.yellow)} auto-open disabled. Open manually: ${proxyUrlEnv.origin}`);
 });
 
-if (scssSidecar) {
-    scssSidecar.start().then((started) => {
-        if (started) {
-            console.log('[SidworksDevTools] SCSS sidecar active (sass-cli mode)');
-        }
-    }).catch((error) => {
-        console.error('[SidworksDevTools] Failed to start SCSS sidecar:', error.message);
-    });
-}
-
-if (changeFeedbackWatcher.start()) {
-    console.log('[SidworksDevTools] JS/Twig change feedback watcher active');
-}
-
-function closeScssSidecar() {
+function cleanup() {
     if (scssSidecar) {
         scssSidecar.close();
     }
-}
-
-function closeChangeFeedbackWatcher() {
     changeFeedbackWatcher.close();
 }
 
-process.on('SIGINT', closeScssSidecar);
-process.on('SIGTERM', closeScssSidecar);
-process.on('exit', closeScssSidecar);
-process.on('SIGINT', closeChangeFeedbackWatcher);
-process.on('SIGTERM', closeChangeFeedbackWatcher);
-process.on('exit', closeChangeFeedbackWatcher);
+process.once('SIGINT', cleanup);
+process.once('SIGTERM', cleanup);
+process.on('exit', cleanup);
 
 function isDocumentRequest(req) {
-    const secFetchDest = (req.headers['sec-fetch-dest'] || req.headers['Sec-Fetch-Dest'] || '').toLowerCase();
-    const secFetchMode = (req.headers['sec-fetch-mode'] || req.headers['Sec-Fetch-Mode'] || '').toLowerCase();
-    const acceptHeader = typeof req.headers.accept === 'string'
-        ? req.headers.accept.toLowerCase()
-        : '';
+    const accept = typeof req.headers.accept === 'string' ? req.headers.accept : '';
 
     return (
-        secFetchDest === 'document' ||
-        secFetchMode === 'navigate' ||
-        acceptHeader.includes('text/html')
+        req.headers['sec-fetch-dest'] === 'document' ||
+        req.headers['sec-fetch-mode'] === 'navigate' ||
+        accept.includes('text/html')
     );
 }
 
@@ -355,25 +314,18 @@ function openBrowserWithUrl(url) {
 }
 
 function isLineItemRequest(requestUrl) {
-    return (requestUrl || '').indexOf('/checkout/line-item/') !== -1;
+    return (requestUrl || '').includes('/checkout/line-item/');
 }
 
 function isOffcanvasRequest(requestUrl) {
-    return ['/widgets/menu/offcanvas', '/checkout/offcanvas'].some(requestPath => (requestUrl || '').includes(requestPath));
+    const url = requestUrl || '';
+    return url.includes('/widgets/menu/offcanvas') || url.includes('/checkout/offcanvas');
 }
 
 function requiresResponseRewrite(req) {
     const requestUrl = req.url || '';
 
-    if (isLineItemRequest(requestUrl)) {
-        return true;
-    }
-
-    if (isOffcanvasRequest(requestUrl)) {
-        return true;
-    }
-
-    return isDocumentRequest(req);
+    return isLineItemRequest(requestUrl) || isOffcanvasRequest(requestUrl) || isDocumentRequest(req);
 }
 
 function escapeRegExp(value) {
@@ -392,24 +344,16 @@ function parseUrlOrNull(value) {
     }
 }
 
-function listenProxyServer(server, protocol, skipSslMessage = false) {
+function listenProxyServer(server, protocol) {
     server.on('error', (error) => {
         if (error.code === 'EADDRINUSE') {
-            console.error(`Proxy port ${proxyPort} is already in use.`);
-            console.error('Stop the existing watcher process or use a different STOREFRONT_PROXY_PORT.');
+            console.error(`[SidworksDevTools] Port ${proxyPort} is already in use. Stop the existing watcher or use a different STOREFRONT_PROXY_PORT.`);
             process.exit(1);
         }
 
-        console.error(`Unable to start ${protocol} proxy server:`, error);
+        console.error(`[SidworksDevTools] Unable to start ${protocol} proxy server:`, error);
         process.exit(1);
     });
 
-    server.listen(proxyPort, () => {
-        if (protocol === 'https') {
-            console.log(`[SidworksDevTools] ${tag('PROXY')} using HTTPS with SSL certificate files.`);
-            return;
-        }
-
-        console.log(`[SidworksDevTools] ${tag('PROXY')} using HTTP${skipSslMessage ? ' (SSL certificates are skipped).' : '.'}`);
-    });
+    server.listen(proxyPort);
 }

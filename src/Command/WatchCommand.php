@@ -22,6 +22,7 @@ class WatchCommand extends Command
             ->addOption('no-js', null, InputOption::VALUE_NONE, 'Disable JS compilation (core + plugins)')
             ->addOption('no-twig', null, InputOption::VALUE_NONE, 'Disable Twig watch/live reload feedback')
             ->addOption('no-scss', null, InputOption::VALUE_NONE, 'Disable SCSS compilation')
+            ->addOption('open-browser', null, InputOption::VALUE_NONE, 'Auto-open browser on startup')
             ->addOption('theme-name', null, InputOption::VALUE_REQUIRED, 'Technical theme name passed to theme:dump')
             ->addOption('theme-id', null, InputOption::VALUE_REQUIRED, 'Theme ID passed to theme:dump')
             ->addOption('domain-url', null, InputOption::VALUE_REQUIRED, 'Sales channel domain URL passed to theme:dump')
@@ -62,10 +63,10 @@ class WatchCommand extends Command
         }
 
         $packageManager = $this->selectPackageManager($io);
-        $fastProfile = true;
         $disableJs = (bool) $input->getOption('no-js');
         $disableTwig = (bool) $input->getOption('no-twig');
         $disableScss = (bool) $input->getOption('no-scss');
+        $openBrowser = (bool) $input->getOption('open-browser');
         $themeName = $this->normalizeOptionalString($input->getOption('theme-name'));
         $themeId = $this->normalizeOptionalString($input->getOption('theme-id'));
         $domainUrl = $this->normalizeOptionalString($input->getOption('domain-url'));
@@ -73,7 +74,6 @@ class WatchCommand extends Command
         $canRunThemePicker = $input->isInteractive() && Process::isTtySupported();
         $hasExplicitThemeSelection = $themeName !== '' || $themeId !== '' || $domainUrl !== '';
         $pickTheme = $pickThemeOption || (!$hasExplicitThemeSelection && $canRunThemePicker);
-        $openBrowser = false;
         $scssEngine = $this->resolveScssEngine();
 
         if ($themeName !== '' && $themeId !== '') {
@@ -108,7 +108,6 @@ class WatchCommand extends Command
 
         $hotEnvironment = $this->buildHotEnvironment(
             $projectRoot,
-            $fastProfile,
             $scssEngine,
             $disableJs,
             $disableTwig,
@@ -116,21 +115,11 @@ class WatchCommand extends Command
             $openBrowser
         );
 
-        $this->renderStartupOverview(
-            $io,
-            $projectRoot,
-            $packageManager,
-            $storefrontApp,
-            $hotProxyScript,
-            $hotEnvironment,
-            $fastProfile,
-            $scssEngine,
-            $disableJs,
-            $disableTwig,
-            $disableScss
-        );
+        $proxyPort = (int) ($hotEnvironment['STOREFRONT_PROXY_PORT'] ?? 9998) ?: 9998;
+        $assetPort = (int) ($hotEnvironment['STOREFRONT_ASSETS_PORT'] ?? 9999) ?: 9999;
+        $this->killProcessesOnPorts([$proxyPort, $assetPort], $io);
 
-        $io->note('Fast profile is the default: skip-postcss + scss-engine=sass-cli + no-open-browser.');
+        $this->renderStartupOverview($io, $projectRoot, $packageManager, $storefrontApp, $hotProxyScript, $hotEnvironment);
 
         if (!is_dir($storefrontApp . '/node_modules/webpack-dev-server')) {
             $io->writeln('Installing storefront dependencies');
@@ -152,15 +141,7 @@ class WatchCommand extends Command
             }
         }
 
-        $prepExitCode = $this->runPrepCommands(
-            $output,
-            $input,
-            $projectRoot,
-            $themeName,
-            $themeId,
-            $domainUrl,
-            $pickTheme
-        );
+        $prepExitCode = $this->runPrepCommands($output, $input, $projectRoot, $themeName, $themeId, $domainUrl, $pickTheme);
         if ($prepExitCode !== 0) {
             return $prepExitCode;
         }
@@ -173,6 +154,7 @@ class WatchCommand extends Command
         }
 
         $watchProcess = new Process([$nodeBinary, $hotProxyScript], $projectRoot, $hotEnvironment, null, null);
+
         return $this->runProcess($watchProcess, $output, $input);
     }
 
@@ -184,11 +166,9 @@ class WatchCommand extends Command
         string $themeId,
         string $domainUrl,
         bool $pickTheme
-    ): int
-    {
+    ): int {
         $hasThemeSelection = $themeName !== '' || $themeId !== '' || $domainUrl !== '' || $pickTheme;
-        $skipThemeDump = is_file($projectRoot . '/var/theme-files.json') && !$hasThemeSelection;
-        if ($skipThemeDump) {
+        if (is_file($projectRoot . '/var/theme-files.json') && !$hasThemeSelection) {
             return 0;
         }
 
@@ -205,13 +185,7 @@ class WatchCommand extends Command
             $themeDumpArguments[] = $domainUrl;
         }
 
-        return $this->runConsoleCommand(
-            $themeDumpArguments,
-            $projectRoot,
-            $output,
-            $input,
-            !$pickTheme
-        );
+        return $this->runConsoleCommand($themeDumpArguments, $projectRoot, $output, $input, !$pickTheme);
     }
 
     private function runConsoleCommand(
@@ -220,8 +194,7 @@ class WatchCommand extends Command
         OutputInterface $output,
         InputInterface $input,
         bool $nonInteractive = true
-    ): int
-    {
+    ): int {
         if (
             $nonInteractive
             && !\in_array('--no-interaction', $arguments, true)
@@ -241,38 +214,45 @@ class WatchCommand extends Command
         string $packageManager,
         string $storefrontApp,
         string $hotProxyScript,
-        array $hotEnvironment,
-        bool $fastProfile,
-        string $scssEngine,
-        bool $disableJs,
-        bool $disableTwig,
-        bool $disableScss
+        array $hotEnvironment
     ): void {
+        $disableJs = ($hotEnvironment['SHOPWARE_STOREFRONT_DISABLE_JS'] ?? '0') === '1';
+        $disableTwig = ($hotEnvironment['SHOPWARE_STOREFRONT_DISABLE_TWIG'] ?? '0') === '1';
+        $disableScss = ($hotEnvironment['SHOPWARE_STOREFRONT_DISABLE_SCSS'] ?? '0') === '1';
+        $scssEngine = $hotEnvironment['SHOPWARE_STOREFRONT_SCSS_ENGINE'] ?? 'webpack';
+
         $io->title('Sidworks Storefront Watcher');
-        $io->section('Runtime');
+
         $io->definitionList(
-            ['Package manager' => \sprintf('<info>%s</info>', $packageManager)],
-            ['Storefront app' => \sprintf('<comment>%s</comment>', $this->formatPathForDisplay($storefrontApp, $projectRoot))],
-            ['Hot proxy runtime' => \sprintf('<comment>%s</comment>', $this->formatPathForDisplay($hotProxyScript, $projectRoot))],
+            ['Storefront' => \sprintf('<comment>%s</comment>', $this->formatPathForDisplay($storefrontApp, $projectRoot))],
+            ['SCSS engine' => \sprintf('<info>%s</info>', $scssEngine)],
+            ['Parallelism' => \sprintf('<info>%s</info> cores', $hotEnvironment['SHOPWARE_BUILD_PARALLELISM'])],
         );
 
-        $io->section('Build Profile');
-        $io->definitionList(
-            ['Core-only hot mode' => $this->yesNo($hotEnvironment['SHOPWARE_STOREFRONT_HOT_CORE_ONLY'])],
-            ['Fast preset' => $this->yesNo($fastProfile ? '1' : '0')],
-            ['Disable JS' => $disableJs ? '<comment>yes</comment>' : '<info>no</info>'],
-            ['Disable Twig' => $disableTwig ? '<comment>yes</comment>' : '<info>no</info>'],
-            ['Disable SCSS' => $disableScss ? '<comment>yes</comment>' : '<info>no</info>'],
-            ['SCSS engine' => \sprintf('<info>%s</info>', $scssEngine)],
-            ['Auto-install sass-embedded' => $this->yesNo($hotEnvironment['SHOPWARE_STOREFRONT_AUTO_INSTALL_SASS_EMBEDDED'])],
-            ['Twig watch mode' => \sprintf('<info>%s</info>', $hotEnvironment['SHOPWARE_STOREFRONT_TWIG_WATCH_MODE'])],
-            ['Build parallelism' => \sprintf('<info>%s</info>', $hotEnvironment['SHOPWARE_BUILD_PARALLELISM'])],
-            ['JS source maps' => $this->yesNo($hotEnvironment['SHOPWARE_STOREFRONT_JS_SOURCE_MAP'])],
-            ['SCSS source maps' => $this->yesNo($hotEnvironment['SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP'])],
-            ['Skip PostCSS' => $this->yesNo($hotEnvironment['SHOPWARE_STOREFRONT_SKIP_POSTCSS'])],
-            ['Use sass-embedded' => $this->yesNo($hotEnvironment['SHOPWARE_STOREFRONT_USE_SASS_EMBEDDED'])],
-            ['Auto-open browser' => $this->yesNo($hotEnvironment['SHOPWARE_STOREFRONT_OPEN_BROWSER'])],
-        );
+        $flags = [];
+        if ($disableJs) {
+            $flags[] = '<comment>JS disabled</comment>';
+        }
+        if ($disableTwig) {
+            $flags[] = '<comment>Twig disabled</comment>';
+        }
+        if ($disableScss) {
+            $flags[] = '<comment>SCSS disabled</comment>';
+        }
+        if (($hotEnvironment['SHOPWARE_STOREFRONT_HOT_CORE_ONLY'] ?? '0') === '1') {
+            $flags[] = '<comment>core-only mode</comment>';
+        }
+        if (($hotEnvironment['SHOPWARE_STOREFRONT_JS_SOURCE_MAP'] ?? '0') === '1') {
+            $flags[] = 'JS source maps';
+        }
+        if (($hotEnvironment['SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP'] ?? '0') === '1') {
+            $flags[] = 'SCSS source maps';
+        }
+
+        if ($flags !== []) {
+            $io->writeln(\sprintf('  <info>Flags:</info> %s', implode(', ', $flags)));
+            $io->newLine();
+        }
     }
 
     private function runPackageInstall(
@@ -314,6 +294,7 @@ class WatchCommand extends Command
 
         if ($exitCode === 0 && $this->hasSassEmbedded($storefrontApp)) {
             $io->success('sass-embedded installed');
+
             return 0;
         }
 
@@ -416,32 +397,29 @@ class WatchCommand extends Command
 
     private function buildHotEnvironment(
         string $projectRoot,
-        bool $fastProfile,
         string $scssEngine,
         bool $disableJs,
         bool $disableTwig,
         bool $disableScss,
         bool $openBrowser
-    ): array
-    {
+    ): array {
         $buildParallelism = $this->env('SHOPWARE_BUILD_PARALLELISM', '');
         if ($buildParallelism === '') {
             $buildParallelism = (string) max(1, $this->detectCpuCount() - 1);
         }
 
-        $twigWatchMode = $disableTwig
-            ? 'off'
-            : 'narrow';
-
+        $twigWatchMode = $disableTwig ? 'off' : 'narrow';
         $useSassEmbedded = $this->env('SHOPWARE_STOREFRONT_USE_SASS_EMBEDDED', '1');
         $scssSourceMapEnabled = $this->env(
             'SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP',
             $scssEngine === 'sass-cli' ? '1' : '0'
         );
+        $nodeOptions = $this->appendNodeOption($this->env('NODE_OPTIONS', ''), '--no-deprecation');
 
         $environment = [
             'PROJECT_ROOT' => $projectRoot,
             'NODE_ENV' => $this->env('NODE_ENV', 'development'),
+            'NODE_OPTIONS' => $nodeOptions,
             'MODE' => $this->env('MODE', 'hot'),
             'NPM_CONFIG_FUND' => 'false',
             'NPM_CONFIG_AUDIT' => 'false',
@@ -451,7 +429,7 @@ class WatchCommand extends Command
             'SHOPWARE_STOREFRONT_USE_SASS_EMBEDDED' => $useSassEmbedded,
             'SHOPWARE_STOREFRONT_HOT_CORE_ONLY' => $disableJs ? '1' : '0',
             'SHOPWARE_STOREFRONT_TWIG_WATCH_MODE' => $twigWatchMode,
-            'SHOPWARE_STOREFRONT_JS_SOURCE_MAP' => '0',
+            'SHOPWARE_STOREFRONT_JS_SOURCE_MAP' => $this->env('SHOPWARE_STOREFRONT_JS_SOURCE_MAP', '0'),
             'SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP' => $scssSourceMapEnabled,
             'SHOPWARE_STOREFRONT_SCSS_ENGINE' => $scssEngine,
             'SHOPWARE_STOREFRONT_SKIP_POSTCSS' => '1',
@@ -476,11 +454,7 @@ class WatchCommand extends Command
 
     private function shouldAutoInstallSassEmbedded(bool $useSassEmbeddedEnabled, bool $disableScss): bool
     {
-        if ($disableScss) {
-            return false;
-        }
-
-        if (!$useSassEmbeddedEnabled) {
+        if ($disableScss || !$useSassEmbeddedEnabled) {
             return false;
         }
 
@@ -494,20 +468,14 @@ class WatchCommand extends Command
 
     private function detectCpuCount(): int
     {
-        $cpuInfoPath = '/proc/cpuinfo';
-        if (!is_file($cpuInfoPath)) {
-            return 2;
-        }
-
-        $contents = file_get_contents($cpuInfoPath);
-        if ($contents === false) {
+        $contents = @file_get_contents('/proc/cpuinfo');
+        if (!$contents) {
             return 2;
         }
 
         preg_match_all('/^processor\s*:/m', $contents, $matches);
-        $count = \is_array($matches[0] ?? null) ? \count($matches[0]) : 0;
 
-        return $count > 0 ? $count : 2;
+        return !empty($matches[0]) ? \count($matches[0]) : 2;
     }
 
     private function resolveStorefrontApp(string $projectRoot): string
@@ -549,16 +517,19 @@ class WatchCommand extends Command
 
     private function resolveProjectRoot(string $startDirectory): string
     {
-        $directory = $startDirectory;
-        $rootDirectory = \dirname($directory);
+        $current = $startDirectory;
 
-        while ($directory !== $rootDirectory) {
-            if (is_dir($directory . '/vendor/shopware') && is_dir($directory . '/var')) {
-                return $directory;
+        while (true) {
+            if (is_dir($current . '/vendor/shopware') && is_dir($current . '/var')) {
+                return $current;
             }
 
-            $directory = $rootDirectory;
-            $rootDirectory = \dirname($directory);
+            $parent = \dirname($current);
+            if ($parent === $current) {
+                break;
+            }
+
+            $current = $parent;
         }
 
         throw new \RuntimeException('Could not resolve project root for sidworks:watch-storefront');
@@ -604,19 +575,26 @@ class WatchCommand extends Command
         return (string) $value;
     }
 
+    private function appendNodeOption(string $options, string $option): string
+    {
+        $normalized = trim($options);
+        if ($normalized === '') {
+            return $option;
+        }
+
+        $parts = preg_split('/\s+/', $normalized);
+        if (\is_array($parts) && \in_array($option, $parts, true)) {
+            return $normalized;
+        }
+
+        return $normalized . ' ' . $option;
+    }
+
     private function resolveScssEngine(): string
     {
         $envValue = strtolower($this->env('SHOPWARE_STOREFRONT_SCSS_ENGINE', ''));
-        if ($envValue !== '') {
-            return $envValue;
-        }
 
-        return 'sass-cli';
-    }
-
-    private function yesNo(string $value): string
-    {
-        return $value === '1' ? '<info>yes</info>' : '<comment>no</comment>';
+        return $envValue !== '' ? $envValue : 'sass-cli';
     }
 
     private function formatPathForDisplay(string $path, string $projectRoot): string
@@ -625,10 +603,125 @@ class WatchCommand extends Command
         $normalizedProjectRoot = rtrim(str_replace('\\', '/', $projectRoot), '/');
 
         if ($normalizedProjectRoot !== '' && str_starts_with($normalizedPath, $normalizedProjectRoot . '/')) {
-            return '<project>/' . ltrim(substr($normalizedPath, strlen($normalizedProjectRoot)), '/');
+            return '<project>/' . ltrim(substr($normalizedPath, \strlen($normalizedProjectRoot)), '/');
         }
 
         return $normalizedPath;
+    }
+
+    private function killProcessesOnPorts(array $ports, SymfonyStyle $io): void
+    {
+        foreach ($ports as $port) {
+            $portNumber = (int) $port;
+            if ($portNumber <= 0) {
+                continue;
+            }
+
+            $pidList = $this->findPidsListeningOnPort($portNumber);
+            if ($pidList === []) {
+                continue;
+            }
+
+            $io->writeln(\sprintf('Stopping existing process on port %d (PID: %s)', $portNumber, implode(', ', $pidList)));
+            $this->killPids($pidList, '-TERM');
+
+            usleep(250000);
+
+            $remainingPids = $this->findPidsListeningOnPort($portNumber);
+            if ($remainingPids !== []) {
+                $io->writeln(\sprintf('Force stopping process on port %d (PID: %s)', $portNumber, implode(', ', $remainingPids)));
+                $this->killPids($remainingPids, '-KILL');
+            }
+        }
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function findPidsListeningOnPort(int $port): array
+    {
+        if ($this->resolveBinary('lsof') !== null) {
+            $lsof = new Process(['lsof', '-ti', ':' . $port]);
+            $lsof->run();
+            $fromLsof = $this->extractPidTokens($lsof->getOutput());
+            if ($fromLsof !== []) {
+                return $fromLsof;
+            }
+        }
+
+        if ($this->resolveBinary('fuser') !== null) {
+            $fuser = new Process(['fuser', '-n', 'tcp', (string) $port]);
+            $fuser->run();
+            $fromFuser = $this->extractPidTokensFromFuserOutput($fuser->getOutput() . PHP_EOL . $fuser->getErrorOutput());
+            if ($fromFuser !== []) {
+                return $fromFuser;
+            }
+        }
+
+        if ($this->resolveBinary('ss') !== null) {
+            $ss = new Process(['ss', '-ltnp', 'sport = :' . $port]);
+            $ss->run();
+            $fromSs = $this->extractPidTokensFromSsOutput($ss->getOutput() . PHP_EOL . $ss->getErrorOutput());
+            if ($fromSs !== []) {
+                return $fromSs;
+            }
+        }
+
+        return [];
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function extractPidTokens(string $output): array
+    {
+        preg_match_all('/\b(\d+)\b/', $output, $matches);
+        $pids = $matches[1] ?? [];
+        if (!\is_array($pids)) {
+            return [];
+        }
+
+        $pids = array_values(array_unique(array_filter(array_map('trim', $pids), static fn (string $value): bool => $value !== '')));
+
+        return $pids;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function extractPidTokensFromFuserOutput(string $output): array
+    {
+        $segments = explode(':', $output, 2);
+        $pidSection = isset($segments[1]) ? $segments[1] : $output;
+
+        return $this->extractPidTokens($pidSection);
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function extractPidTokensFromSsOutput(string $output): array
+    {
+        preg_match_all('/pid=(\d+)/', $output, $matches);
+        $pids = $matches[1] ?? [];
+        if (!\is_array($pids)) {
+            return [];
+        }
+
+        return array_values(array_unique(array_filter(array_map('trim', $pids), static fn (string $value): bool => $value !== '')));
+    }
+
+    /**
+     * @param list<string> $pids
+     */
+    private function killPids(array $pids, string $signal): void
+    {
+        if ($pids === []) {
+            return;
+        }
+
+        $kill = new Process(['kill', $signal, ...$pids]);
+        $kill->run();
     }
 
     private function normalizeOptionalString(mixed $value): string

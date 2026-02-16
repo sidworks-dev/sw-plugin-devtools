@@ -7,16 +7,11 @@ const {
     resolveStorefrontApp,
     createStorefrontRequire,
 } = require('./runtime-paths');
-
-const storefrontSassDeprecationsList = ['import', 'global-builtin', 'color-functions', 'slash-div', 'legacy-js-api'];
-
-function asBoolean(value, defaultValue) {
-    if (typeof value === 'undefined' || value === '') {
-        return defaultValue;
-    }
-
-    return value !== '0' && value !== 'false';
-}
+const {
+    asBoolean,
+    asString,
+    getSassDeprecationsToSilence,
+} = require('./utils');
 
 function toArray(value) {
     if (Array.isArray(value)) {
@@ -30,48 +25,23 @@ function toArray(value) {
     return [value];
 }
 
-function asString(value, defaultValue) {
-    if (typeof value === 'undefined' || value === null || value === '') {
-        return defaultValue;
-    }
-
-    return String(value);
-}
-
-function getSassDeprecationsToSilence(sassImplementation) {
-    const silenced = [...storefrontSassDeprecationsList];
-    const implementationInfo = String(sassImplementation?.info || '').toLowerCase();
-
-    // `mixed-decls` is obsolete in newer sass-embedded versions and can emit
-    // an extra warning if we try to silence it there.
-    if (!implementationInfo.includes('sass-embedded')) {
-        silenced.push('mixed-decls');
-    }
-
-    return silenced;
-}
-
 function resolveWebSocketHostname() {
-    const fallbackHost = 'localhost';
     const sourceUrl = process.env.PROXY_URL || process.env.APP_URL || '';
 
     if (!sourceUrl) {
-        return fallbackHost;
+        return 'localhost';
     }
 
     try {
         return new URL(sourceUrl).hostname;
     } catch (_error) {
-        return fallbackHost;
+        return 'localhost';
     }
 }
 
 function normalizeLoaderRuleEntry(entry) {
     if (typeof entry === 'string') {
-        return {
-            loader: entry,
-            options: {},
-        };
+        return { loader: entry, options: {} };
     }
 
     if (!entry || typeof entry !== 'object') {
@@ -80,9 +50,7 @@ function normalizeLoaderRuleEntry(entry) {
 
     return {
         ...entry,
-        options: {
-            ...(entry.options || {}),
-        },
+        options: { ...(entry.options || {}) },
     };
 }
 
@@ -160,9 +128,7 @@ function patchScssRule(scssRule, options) {
         if (isPostCssLoader(loaderName)) {
             normalized.options.sourceMap = options.scssSourceMapEnabled;
             if (!normalized.options.postcssOptions) {
-                normalized.options.postcssOptions = {
-                    config: false,
-                };
+                normalized.options.postcssOptions = { config: false };
             }
         }
 
@@ -198,9 +164,7 @@ function patchWatchFiles(coreConfig, options) {
     ];
 
     if (!coreConfig.devServer.watchFiles) {
-        coreConfig.devServer.watchFiles = {
-            options: {},
-        };
+        coreConfig.devServer.watchFiles = { options: {} };
     }
 
     const watchFiles = coreConfig.devServer.watchFiles;
@@ -216,8 +180,7 @@ function patchWatchFiles(coreConfig, options) {
         ];
     }
 
-    const mergedIgnored = [...new Set([...toArray(watchFiles.options.ignored), ...defaultIgnored])];
-    watchFiles.options.ignored = mergedIgnored;
+    watchFiles.options.ignored = [...new Set([...toArray(watchFiles.options.ignored), ...defaultIgnored])];
 }
 
 function patchScssSidecarWatchBehavior(configArray) {
@@ -288,11 +251,7 @@ function patchScssRulesToNoop(configArray) {
                 return;
             }
 
-            rule.use = [
-                {
-                    loader: noopScssLoaderPath,
-                },
-            ];
+            rule.use = [{ loader: noopScssLoaderPath }];
         });
     }
 }
@@ -304,8 +263,7 @@ function stripWebpackBarPlugins(configArray) {
         }
 
         config.plugins = config.plugins.filter((plugin) => {
-            const constructorName = String(plugin?.constructor?.name || '');
-            return !/webpackbar/i.test(constructorName);
+            return !/webpackbar/i.test(String(plugin?.constructor?.name || ''));
         });
     }
 }
@@ -343,14 +301,11 @@ function loadPatchedWebpackConfig(explicitProjectRoot) {
         if (useSassEmbedded) {
             try {
                 sassImplementation = storefrontRequire('sass-embedded');
-                console.log('[SidworksDevTools] Using sass-embedded in hot mode');
             } catch (_error) {
                 try {
                     sassImplementation = runtimeRequire('sass-embedded');
-                    console.log('[SidworksDevTools] Using sass-embedded from runtime in hot mode');
                 } catch (_runtimeError) {
-                    console.log('[SidworksDevTools] sass-embedded not available, using sass');
-                    console.log('[SidworksDevTools] Install hint: npm --prefix vendor/shopware/storefront/Resources/app/storefront i -D sass-embedded');
+                    // sass-embedded not available, keep using sass
                 }
             }
         }
@@ -378,46 +333,35 @@ function loadPatchedWebpackConfig(explicitProjectRoot) {
 
     coreConfig.devtool = jsSourceMapEnabled ? 'eval-cheap-module-source-map' : false;
 
-    // When this config is required outside the storefront app directory,
-    // Shopware's path.resolve('src') entry can resolve to the project root.
-    // Force the core storefront entry to its absolute path.
     if (coreConfig.entry && Object.prototype.hasOwnProperty.call(coreConfig.entry, 'storefront')) {
         coreConfig.entry.storefront = path.resolve(storefrontApp, 'src/main.js');
     }
 
     if (disableScss && coreConfig.entry && Object.prototype.hasOwnProperty.call(coreConfig.entry, 'hot-reloading')) {
         delete coreConfig.entry['hot-reloading'];
-        console.log('[SidworksDevTools] SCSS compilation disabled (--no-scss)');
     }
 
     if (disableJs) {
         const emptyEntryPath = path.resolve(__dirname, 'empty-entry.js');
-        const nextEntry = {
-            storefront: emptyEntryPath,
-        };
+        const nextEntry = { storefront: emptyEntryPath };
 
         if (!disableScss && !useScssSidecar && coreConfig.entry && coreConfig.entry['hot-reloading']) {
             nextEntry['hot-reloading'] = coreConfig.entry['hot-reloading'];
         }
 
         coreConfig.entry = nextEntry;
-        console.log('[SidworksDevTools] JS compilation disabled (--no-js)');
     }
 
     if (useScssSidecar) {
         if (coreConfig.entry && Object.prototype.hasOwnProperty.call(coreConfig.entry, 'hot-reloading')) {
             delete coreConfig.entry['hot-reloading'];
         }
-        console.log('[SidworksDevTools] SCSS sidecar mode enabled (webpack SCSS entry disabled)');
         patchScssSidecarWatchBehavior(configArray);
         patchScssRulesToNoop(configArray);
-        console.log('[SidworksDevTools] SCSS sidecar mode: webpack SCSS imports disabled (handled by sidecar)');
-        console.log('[SidworksDevTools] SCSS sidecar mode: webpack ignores SCSS/SASS change events (JS rebuilds only on JS changes)');
     }
 
     if (disableTwig && coreConfig.devServer) {
         delete coreConfig.devServer.watchFiles;
-        console.log('[SidworksDevTools] Twig watch disabled (--no-twig)');
     }
 
     const assetPort = parseInt(process.env.STOREFRONT_ASSETS_PORT || '', 10) || 9999;
@@ -447,10 +391,7 @@ function loadPatchedWebpackConfig(explicitProjectRoot) {
     }
 
     if (!disableTwig) {
-        patchWatchFiles(coreConfig, {
-            projectRoot,
-            twigWatchMode,
-        });
+        patchWatchFiles(coreConfig, { projectRoot, twigWatchMode });
     }
 
     if (!useScssSidecar) {
@@ -466,9 +407,7 @@ function loadPatchedWebpackConfig(explicitProjectRoot) {
 
     const effectiveConfigArray = coreOnlyHotMode ? [coreConfig] : configArray;
 
-    if (coreOnlyHotMode) {
-        console.log('[SidworksDevTools] Core-only hot mode enabled (plugin JS compilers disabled)');
-    }
+    // coreOnlyHotMode is reflected in the PHP startup overview
 
     if (!verboseWebpackOutput) {
         stripWebpackBarPlugins(effectiveConfigArray);
@@ -487,19 +426,16 @@ function loadPatchedWebpackConfig(explicitProjectRoot) {
     }
 
     const explicitParallelism = parseInt(process.env.SHOPWARE_BUILD_PARALLELISM || '', 10);
-    const detectedCpuCount = (() => {
-        const cpuInfo = os.cpus();
-        if (!cpuInfo || cpuInfo.length === 0) {
-            return 2;
-        }
-
-        return cpuInfo.length;
-    })();
-
-    const defaultParallelism = Math.max(1, detectedCpuCount - 1);
-    effectiveConfigArray.parallelism = Number.isInteger(explicitParallelism) && explicitParallelism > 0
+    const detectedCpuCount = os.cpus().length || 2;
+    const parallelismValue = Number.isInteger(explicitParallelism) && explicitParallelism > 0
         ? explicitParallelism
-        : defaultParallelism;
+        : Math.max(1, detectedCpuCount - 1);
+
+    for (const config of effectiveConfigArray) {
+        if (config && typeof config === 'object') {
+            config.parallelism = parallelismValue;
+        }
+    }
 
     return effectiveConfigArray;
 }
