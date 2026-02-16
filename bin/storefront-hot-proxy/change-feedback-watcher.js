@@ -15,9 +15,10 @@ const {
     createLogger,
 } = require('./utils');
 
-function createChangeFeedbackWatcher(projectRoot) {
+function createChangeFeedbackWatcher(projectRoot, options = {}) {
     const DUPLICATE_LOG_WINDOW_MS = 2000;
     const TWIG_DEBOUNCE_MS = 90;
+    const TRANSLATION_DEBOUNCE_MS = 180;
     const rootPath = path.resolve(projectRoot);
     const storefrontApp = resolveStorefrontApp(rootPath);
     const storefrontRequire = createStorefrontRequire(rootPath);
@@ -26,12 +27,25 @@ function createChangeFeedbackWatcher(projectRoot) {
     const disableJsCompilation = process.env.SHOPWARE_STOREFRONT_DISABLE_JS === '1';
     const jsCompileFeedbackEnabled = process.env.SHOPWARE_STOREFRONT_JS_COMPILE_FEEDBACK !== '0';
     const disableTwigWatch = process.env.SHOPWARE_STOREFRONT_DISABLE_TWIG === '1';
+    const disableTranslationWatch = process.env.SHOPWARE_STOREFRONT_DISABLE_TRANSLATION_WATCH === '1';
+    const onTranslationChange = typeof options.onTranslationChange === 'function'
+        ? options.onTranslationChange
+        : null;
     const twigLog = createLogger('TWIG');
+    const translationLog = createLogger('I18N');
 
     let watchpack = null;
     const recentlyLogged = new Map();
     const twigState = {
         timer: null,
+        waitLogged: false,
+        pendingEventType: '',
+        pendingFiles: new Set(),
+    };
+    const translationState = {
+        timer: null,
+        inFlight: false,
+        queued: false,
         waitLogged: false,
         pendingEventType: '',
         pendingFiles: new Set(),
@@ -142,6 +156,10 @@ function createChangeFeedbackWatcher(projectRoot) {
             return 'twig';
         }
 
+        if (extension === '.json' && isTranslationJsonFile(filePath)) {
+            return 'translation';
+        }
+
         if (['.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx'].includes(extension)) {
             return 'js';
         }
@@ -155,6 +173,15 @@ function createChangeFeedbackWatcher(projectRoot) {
         const previous = recentlyLogged.get(dedupeKey) || 0;
         recentlyLogged.set(dedupeKey, now);
         return now - previous < DUPLICATE_LOG_WINDOW_MS;
+    }
+
+    function isTranslationJsonFile(filePath) {
+        const normalizedPath = String(filePath || '').replace(/\\/g, '/').toLowerCase();
+        if (normalizedPath === '' || !normalizedPath.endsWith('.json')) {
+            return false;
+        }
+
+        return normalizedPath.includes('/snippet/') || normalizedPath.includes('/snippets/');
     }
 
     function rememberTwigPending(eventType, formattedFile) {
@@ -197,6 +224,80 @@ function createChangeFeedbackWatcher(projectRoot) {
             twigState.timer = null;
             flushTwigReloadFeedback();
         }, TWIG_DEBOUNCE_MS);
+    }
+
+    function rememberTranslationPending(eventType, formattedFile) {
+        if (typeof eventType === 'string' && eventType !== '') {
+            translationState.pendingEventType = eventType;
+        }
+
+        if (typeof formattedFile === 'string' && formattedFile !== '') {
+            translationState.pendingFiles.add(formattedFile);
+        }
+    }
+
+    async function flushTranslationFeedback() {
+        const pendingFiles = [...translationState.pendingFiles];
+        const trigger = translationState.pendingEventType || 'change';
+        const fileSummary = summarizeFiles(pendingFiles);
+        const reasonLabel = fileSummary ? `${trigger}: ${fileSummary}` : trigger;
+
+        if (translationState.inFlight) {
+            translationState.queued = true;
+            if (!translationState.waitLogged) {
+                translationLog.status('WAIT', `change queued while cache flush is running${fileSummary ? ` (${fileSummary})` : ''}`);
+                translationState.waitLogged = true;
+            }
+            return;
+        }
+
+        translationState.pendingEventType = '';
+        translationState.pendingFiles.clear();
+        translationState.waitLogged = false;
+        translationState.inFlight = true;
+        const startedAt = Date.now();
+        translationLog.status('RUN', `flushing cache (${reasonLabel})`);
+
+        try {
+            if (onTranslationChange) {
+                await onTranslationChange({
+                    eventType: trigger,
+                    reasonLabel,
+                    files: pendingFiles,
+                });
+            }
+
+            translationLog.status('OK', `cache flushed + reload triggered (${reasonLabel}) in ${Date.now() - startedAt}ms`);
+        } catch (error) {
+            translationLog.status('ERR', `cache flush failed (${reasonLabel}) after ${Date.now() - startedAt}ms: ${error?.message || error}`, true);
+        } finally {
+            translationState.inFlight = false;
+
+            if (translationState.queued) {
+                translationState.queued = false;
+                setTimeout(() => {
+                    void flushTranslationFeedback();
+                }, TRANSLATION_DEBOUNCE_MS);
+            }
+        }
+    }
+
+    function scheduleTranslationFeedback(eventType, formattedFile) {
+        rememberTranslationPending(eventType, formattedFile);
+
+        if (translationState.timer) {
+            if (!translationState.waitLogged) {
+                const queuedFiles = summarizeFiles([...translationState.pendingFiles]);
+                translationLog.status('WAIT', `change queued while cache flush is running${queuedFiles ? ` (${queuedFiles})` : ''}`);
+                translationState.waitLogged = true;
+            }
+            return;
+        }
+
+        translationState.timer = setTimeout(() => {
+            translationState.timer = null;
+            void flushTranslationFeedback();
+        }, TRANSLATION_DEBOUNCE_MS);
     }
 
     function handleFileEvent(eventType, absoluteFilePath) {
@@ -244,6 +345,24 @@ function createChangeFeedbackWatcher(projectRoot) {
             }
 
             scheduleTwigReloadFeedback(eventType, formattedFile);
+            return;
+        }
+
+        if (fileType === 'translation') {
+            if (disableTranslationWatch) {
+                if (shouldSkipDuplicate(eventType, formattedFile)) {
+                    return;
+                }
+
+                logFileEvent('i18n', eventType, formattedFile, '(skipped: translation watch disabled)');
+                return;
+            }
+
+            if (shouldSkipDuplicate(eventType, formattedFile)) {
+                return;
+            }
+
+            scheduleTranslationFeedback(eventType, formattedFile);
         }
     }
 
@@ -277,6 +396,11 @@ function createChangeFeedbackWatcher(projectRoot) {
         if (twigState.timer) {
             clearTimeout(twigState.timer);
             twigState.timer = null;
+        }
+
+        if (translationState.timer) {
+            clearTimeout(translationState.timer);
+            translationState.timer = null;
         }
 
         if (watchpack) {

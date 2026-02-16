@@ -28,7 +28,12 @@ const assetPort = Number(process.env.STOREFRONT_ASSETS_PORT) || 9999;
 const shouldOpenBrowser = process.env.SHOPWARE_STOREFRONT_OPEN_BROWSER !== '0';
 const scssEngine = String(process.env.SHOPWARE_STOREFRONT_SCSS_ENGINE || 'webpack').toLowerCase();
 const disableScss = process.env.SHOPWARE_STOREFRONT_DISABLE_SCSS === '1';
+const translationCacheFlushEnabled = process.env.SHOPWARE_STOREFRONT_TRANSLATION_CACHE_FLUSH !== '0';
+const translationCacheCommandParts = parseCommandParts(process.env.SHOPWARE_STOREFRONT_TRANSLATION_CACHE_COMMAND || 'cache:flush:all');
+const translationCacheFallbackCommandParts = parseCommandParts(process.env.SHOPWARE_STOREFRONT_TRANSLATION_CACHE_FALLBACK_COMMAND || 'cache:clear:all');
 const noOp = () => {};
+let liveReloadServerInstance = null;
+const pendingReloadReasons = [];
 
 const themeFilesConfigPath = path.resolve(projectRootPath, 'var/theme-files.json');
 let themeFiles = {};
@@ -105,7 +110,15 @@ if (!disableScss && scssEngine === 'sass-cli') {
     scssSidecar = createScssSidecar(projectRootPath);
 }
 
-const changeFeedbackWatcher = createChangeFeedbackWatcher(projectRootPath);
+const changeFeedbackWatcher = createChangeFeedbackWatcher(projectRootPath, {
+    onTranslationChange: async ({ reasonLabel }) => {
+        if (translationCacheFlushEnabled) {
+            await runShopwareCacheFlush();
+        }
+
+        requestLiveReload(reasonLabel || 'translation-json');
+    },
+});
 
 function onProxyReq(proxyReq, req) {
     const requestUrl = req.url || '';
@@ -240,7 +253,17 @@ if (scssSidecar) {
 
 changeFeedbackWatcher.start();
 
-server.then(() => {
+server.then((liveReloadServer) => {
+    liveReloadServerInstance = liveReloadServer;
+
+    if (pendingReloadReasons.length > 0) {
+        const pending = [...pendingReloadReasons];
+        pendingReloadReasons.length = 0;
+        for (const reason of pending) {
+            requestLiveReload(reason);
+        }
+    }
+
     if (proxyUrlEnv.protocol === 'https:' && skipSslCerts === false) {
         try {
             const httpsServer = nodeServerHttps.createServer(sslOptions, proxy);
@@ -311,6 +334,80 @@ function openBrowserWithUrl(url) {
     const start = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
     const child = spawn(start, [url], { stdio: 'ignore', detached: true });
     child.on('error', error => console.log('Unable to open browser! Details:', error));
+}
+
+function parseCommandParts(commandString) {
+    const normalized = String(commandString || '').trim();
+    if (normalized === '') {
+        return ['cache:clear'];
+    }
+
+    return normalized.split(/\s+/).filter((part) => part !== '');
+}
+
+function runShopwareCacheFlush() {
+    return runShopwareConsoleCommand(translationCacheCommandParts).catch((error) => {
+        if (translationCacheFallbackCommandParts.join(' ') === translationCacheCommandParts.join(' ')) {
+            throw error;
+        }
+
+        return runShopwareConsoleCommand(translationCacheFallbackCommandParts);
+    });
+}
+
+function runShopwareConsoleCommand(commandParts) {
+    return new Promise((resolve, reject) => {
+        const commandArgs = [...commandParts];
+        if (!commandArgs.includes('--no-interaction') && !commandArgs.includes('-n')) {
+            commandArgs.push('--no-interaction');
+        }
+
+        const binConsole = path.resolve(projectRootPath, 'bin/console');
+        const child = spawn('php', [binConsole, ...commandArgs], {
+            cwd: projectRootPath,
+            env: process.env,
+            stdio: ['ignore', 'pipe', 'pipe'],
+        });
+
+        let output = '';
+        child.stdout.on('data', (chunk) => {
+            output += chunk.toString();
+        });
+        child.stderr.on('data', (chunk) => {
+            output += chunk.toString();
+        });
+
+        child.on('error', (error) => {
+            reject(error);
+        });
+        child.on('close', (code) => {
+            if (code === 0) {
+                resolve();
+                return;
+            }
+
+            const message = output.replace(/\s+/g, ' ').trim().slice(0, 320);
+            reject(new Error(message || `cache flush command failed with exit code ${code}`));
+        });
+    });
+}
+
+function requestLiveReload(reason) {
+    const reloadReason = typeof reason === 'string' && reason !== '' ? reason : 'translation-json';
+    const serverInstance = liveReloadServerInstance;
+
+    if (!serverInstance || !serverInstance.webSocketServer || !serverInstance.sendMessage) {
+        pendingReloadReasons.push(reloadReason);
+        return false;
+    }
+
+    serverInstance.sendMessage(
+        serverInstance.webSocketServer.clients,
+        'static-changed',
+        reloadReason,
+    );
+
+    return true;
 }
 
 function isLineItemRequest(requestUrl) {
