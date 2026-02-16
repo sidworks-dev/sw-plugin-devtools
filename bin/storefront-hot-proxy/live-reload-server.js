@@ -60,7 +60,7 @@ module.exports = function createLiveReloadServer(sslOptions) {
                 return;
             }
 
-            console.log('Starting the SidworksDevTools hot reload server:\n');
+            // startup summary is handled by start-hot-reload.js
         })();
 
         compiler.hooks.done.tap('resolveServer', () => {

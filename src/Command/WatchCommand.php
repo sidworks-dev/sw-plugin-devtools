@@ -115,6 +115,10 @@ class WatchCommand extends Command
             $openBrowser
         );
 
+        $proxyPort = (int) ($hotEnvironment['STOREFRONT_PROXY_PORT'] ?? 9998) ?: 9998;
+        $assetPort = (int) ($hotEnvironment['STOREFRONT_ASSETS_PORT'] ?? 9999) ?: 9999;
+        $this->killProcessesOnPorts([$proxyPort, $assetPort], $io);
+
         $this->renderStartupOverview($io, $projectRoot, $packageManager, $storefrontApp, $hotProxyScript, $hotEnvironment);
 
         if (!is_dir($storefrontApp . '/node_modules/webpack-dev-server')) {
@@ -215,31 +219,40 @@ class WatchCommand extends Command
         $disableJs = ($hotEnvironment['SHOPWARE_STOREFRONT_DISABLE_JS'] ?? '0') === '1';
         $disableTwig = ($hotEnvironment['SHOPWARE_STOREFRONT_DISABLE_TWIG'] ?? '0') === '1';
         $disableScss = ($hotEnvironment['SHOPWARE_STOREFRONT_DISABLE_SCSS'] ?? '0') === '1';
+        $scssEngine = $hotEnvironment['SHOPWARE_STOREFRONT_SCSS_ENGINE'] ?? 'webpack';
 
         $io->title('Sidworks Storefront Watcher');
-        $io->section('Runtime');
+
         $io->definitionList(
-            ['Package manager' => \sprintf('<info>%s</info>', $packageManager)],
-            ['Storefront app' => \sprintf('<comment>%s</comment>', $this->formatPathForDisplay($storefrontApp, $projectRoot))],
-            ['Hot proxy runtime' => \sprintf('<comment>%s</comment>', $this->formatPathForDisplay($hotProxyScript, $projectRoot))],
+            ['Storefront' => \sprintf('<comment>%s</comment>', $this->formatPathForDisplay($storefrontApp, $projectRoot))],
+            ['SCSS engine' => \sprintf('<info>%s</info>', $scssEngine)],
+            ['Parallelism' => \sprintf('<info>%s</info> cores', $hotEnvironment['SHOPWARE_BUILD_PARALLELISM'])],
         );
 
-        $io->section('Build Profile');
-        $io->definitionList(
-            ['Core-only hot mode' => $this->yesNo($hotEnvironment['SHOPWARE_STOREFRONT_HOT_CORE_ONLY'])],
-            ['Disable JS' => $disableJs ? '<comment>yes</comment>' : '<info>no</info>'],
-            ['Disable Twig' => $disableTwig ? '<comment>yes</comment>' : '<info>no</info>'],
-            ['Disable SCSS' => $disableScss ? '<comment>yes</comment>' : '<info>no</info>'],
-            ['SCSS engine' => \sprintf('<info>%s</info>', $hotEnvironment['SHOPWARE_STOREFRONT_SCSS_ENGINE'])],
-            ['Auto-install sass-embedded' => $this->yesNo($hotEnvironment['SHOPWARE_STOREFRONT_AUTO_INSTALL_SASS_EMBEDDED'])],
-            ['Twig watch mode' => \sprintf('<info>%s</info>', $hotEnvironment['SHOPWARE_STOREFRONT_TWIG_WATCH_MODE'])],
-            ['Build parallelism' => \sprintf('<info>%s</info>', $hotEnvironment['SHOPWARE_BUILD_PARALLELISM'])],
-            ['JS source maps' => $this->yesNo($hotEnvironment['SHOPWARE_STOREFRONT_JS_SOURCE_MAP'])],
-            ['SCSS source maps' => $this->yesNo($hotEnvironment['SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP'])],
-            ['Skip PostCSS' => $this->yesNo($hotEnvironment['SHOPWARE_STOREFRONT_SKIP_POSTCSS'])],
-            ['Use sass-embedded' => $this->yesNo($hotEnvironment['SHOPWARE_STOREFRONT_USE_SASS_EMBEDDED'])],
-            ['Auto-open browser' => $this->yesNo($hotEnvironment['SHOPWARE_STOREFRONT_OPEN_BROWSER'])],
-        );
+        $flags = [];
+        if ($disableJs) {
+            $flags[] = '<comment>JS disabled</comment>';
+        }
+        if ($disableTwig) {
+            $flags[] = '<comment>Twig disabled</comment>';
+        }
+        if ($disableScss) {
+            $flags[] = '<comment>SCSS disabled</comment>';
+        }
+        if (($hotEnvironment['SHOPWARE_STOREFRONT_HOT_CORE_ONLY'] ?? '0') === '1') {
+            $flags[] = '<comment>core-only mode</comment>';
+        }
+        if (($hotEnvironment['SHOPWARE_STOREFRONT_JS_SOURCE_MAP'] ?? '0') === '1') {
+            $flags[] = 'JS source maps';
+        }
+        if (($hotEnvironment['SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP'] ?? '0') === '1') {
+            $flags[] = 'SCSS source maps';
+        }
+
+        if ($flags !== []) {
+            $io->writeln(\sprintf('  <info>Flags:</info> %s', implode(', ', $flags)));
+            $io->newLine();
+        }
     }
 
     private function runPackageInstall(
@@ -567,11 +580,6 @@ class WatchCommand extends Command
         return $envValue !== '' ? $envValue : 'sass-cli';
     }
 
-    private function yesNo(string $value): string
-    {
-        return $value === '1' ? '<info>yes</info>' : '<comment>no</comment>';
-    }
-
     private function formatPathForDisplay(string $path, string $projectRoot): string
     {
         $normalizedPath = str_replace('\\', '/', $path);
@@ -582,6 +590,121 @@ class WatchCommand extends Command
         }
 
         return $normalizedPath;
+    }
+
+    private function killProcessesOnPorts(array $ports, SymfonyStyle $io): void
+    {
+        foreach ($ports as $port) {
+            $portNumber = (int) $port;
+            if ($portNumber <= 0) {
+                continue;
+            }
+
+            $pidList = $this->findPidsListeningOnPort($portNumber);
+            if ($pidList === []) {
+                continue;
+            }
+
+            $io->writeln(\sprintf('Stopping existing process on port %d (PID: %s)', $portNumber, implode(', ', $pidList)));
+            $this->killPids($pidList, '-TERM');
+
+            usleep(250000);
+
+            $remainingPids = $this->findPidsListeningOnPort($portNumber);
+            if ($remainingPids !== []) {
+                $io->writeln(\sprintf('Force stopping process on port %d (PID: %s)', $portNumber, implode(', ', $remainingPids)));
+                $this->killPids($remainingPids, '-KILL');
+            }
+        }
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function findPidsListeningOnPort(int $port): array
+    {
+        if ($this->resolveBinary('lsof') !== null) {
+            $lsof = new Process(['lsof', '-ti', ':' . $port]);
+            $lsof->run();
+            $fromLsof = $this->extractPidTokens($lsof->getOutput());
+            if ($fromLsof !== []) {
+                return $fromLsof;
+            }
+        }
+
+        if ($this->resolveBinary('fuser') !== null) {
+            $fuser = new Process(['fuser', '-n', 'tcp', (string) $port]);
+            $fuser->run();
+            $fromFuser = $this->extractPidTokensFromFuserOutput($fuser->getOutput() . PHP_EOL . $fuser->getErrorOutput());
+            if ($fromFuser !== []) {
+                return $fromFuser;
+            }
+        }
+
+        if ($this->resolveBinary('ss') !== null) {
+            $ss = new Process(['ss', '-ltnp', 'sport = :' . $port]);
+            $ss->run();
+            $fromSs = $this->extractPidTokensFromSsOutput($ss->getOutput() . PHP_EOL . $ss->getErrorOutput());
+            if ($fromSs !== []) {
+                return $fromSs;
+            }
+        }
+
+        return [];
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function extractPidTokens(string $output): array
+    {
+        preg_match_all('/\b(\d+)\b/', $output, $matches);
+        $pids = $matches[1] ?? [];
+        if (!\is_array($pids)) {
+            return [];
+        }
+
+        $pids = array_values(array_unique(array_filter(array_map('trim', $pids), static fn (string $value): bool => $value !== '')));
+
+        return $pids;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function extractPidTokensFromFuserOutput(string $output): array
+    {
+        $segments = explode(':', $output, 2);
+        $pidSection = isset($segments[1]) ? $segments[1] : $output;
+
+        return $this->extractPidTokens($pidSection);
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function extractPidTokensFromSsOutput(string $output): array
+    {
+        preg_match_all('/pid=(\d+)/', $output, $matches);
+        $pids = $matches[1] ?? [];
+        if (!\is_array($pids)) {
+            return [];
+        }
+
+        return array_values(array_unique(array_filter(array_map('trim', $pids), static fn (string $value): bool => $value !== '')));
+    }
+
+    /**
+     * @param list<string> $pids
+     */
+    private function killPids(array $pids, string $signal): void
+    {
+        if ($pids === []) {
+            return;
+        }
+
+        $kill = new Process(['kill', $signal, ...$pids]);
+        $kill->run();
     }
 
     private function normalizeOptionalString(mixed $value): string

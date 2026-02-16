@@ -102,8 +102,6 @@ const baseProxyOptions = {
 let scssSidecar = null;
 if (!disableScss && scssEngine === 'sass-cli') {
     scssSidecar = createScssSidecar(projectRootPath);
-} else if (disableScss) {
-    console.log('[SidworksDevTools] SCSS sidecar disabled (--no-scss)');
 }
 
 const changeFeedbackWatcher = createChangeFeedbackWatcher(projectRootPath);
@@ -219,9 +217,7 @@ const proxy = (req, res) => {
 };
 
 if (appUrlEnv.protocol === 'https:' && !sslFilesFound) {
-    console.error('Could not find the key and certificate files.');
-    console.error('Make sure that the environment variables STOREFRONT_HTTPS_KEY_FILE and STOREFRONT_HTTPS_CERTIFICATE_FILE are set correctly.');
-    console.error('If you use a TLS proxy (like in DDEV Shopware 6 setup), you can ignore this message.');
+    console.warn(`[SidworksDevTools] ${tag('SSL', ANSI.yellow)} No certificate files found. Set STOREFRONT_HTTPS_KEY_FILE / STOREFRONT_HTTPS_CERTIFICATE_FILE or ignore if using a TLS proxy (DDEV).`);
 }
 
 const sslOptions = proxyUrlEnv.protocol === 'https:' && skipSslCerts === false ? {
@@ -235,49 +231,43 @@ const server = createLiveReloadServer(sslOptions).catch((e) => {
     return createLiveReloadServer({});
 });
 
-server.then(() => {
-    console.log(`[SidworksDevTools] ${tag('URL')} storefront: ${colorize(appUrlEnv.origin, ANSI.green)}`);
-    console.log(`[SidworksDevTools] ${tag('URL')} hot proxy: ${colorize(proxyUrlEnv.origin, ANSI.green)}`);
+if (scssSidecar) {
+    scssSidecar.start().catch((error) => {
+        console.error(`[SidworksDevTools] ${tag('SCSS', ANSI.red)} Failed to start sidecar: ${error.message}`);
+    });
+}
 
+changeFeedbackWatcher.start();
+
+server.then(() => {
     if (proxyUrlEnv.protocol === 'https:' && skipSslCerts === false) {
         try {
             const httpsServer = nodeServerHttps.createServer(sslOptions, proxy);
             listenProxyServer(httpsServer, 'https');
         } catch (e) {
             console.error(e);
-            console.error('Could not start the proxy server with the provided certificate files, falling back to http server.');
+            console.error('Could not start proxy with certificates, falling back to HTTP.');
             proxyUrlEnv.protocol = 'http:';
         }
     }
 
     if (proxyUrlEnv.protocol === 'http:' || skipSslCerts === true) {
         const httpServer = nodeServerHttp.createServer(proxy);
-        listenProxyServer(httpServer, 'http', skipSslCerts);
+        listenProxyServer(httpServer, 'http');
     }
 
+    const protocol = proxyUrlEnv.protocol === 'https:' ? 'HTTPS' : 'HTTP';
+    console.log('');
+    console.log(`[SidworksDevTools] ${colorize('Ready', ANSI.green)} (${protocol})`);
+    console.log('');
+    console.log(`  Storefront  ${colorize(appUrlEnv.origin, ANSI.cyan)}`);
+    console.log(`  Hot proxy   ${colorize(proxyUrlEnv.origin, ANSI.green)}`);
     console.log('');
 
     if (shouldOpenBrowser) {
         openBrowserWithUrl(`${proxyUrlEnv.origin}`);
-        return;
     }
-
-    console.log(`[SidworksDevTools] ${tag('OPEN', ANSI.yellow)} auto-open disabled. Open manually: ${proxyUrlEnv.origin}`);
 });
-
-if (scssSidecar) {
-    scssSidecar.start().then((started) => {
-        if (started) {
-            console.log('[SidworksDevTools] SCSS sidecar active (sass-cli mode)');
-        }
-    }).catch((error) => {
-        console.error('[SidworksDevTools] Failed to start SCSS sidecar:', error.message);
-    });
-}
-
-if (changeFeedbackWatcher.start()) {
-    console.log('[SidworksDevTools] JS/Twig change feedback watcher active');
-}
 
 function cleanup() {
     if (scssSidecar) {
@@ -353,24 +343,16 @@ function parseUrlOrNull(value) {
     }
 }
 
-function listenProxyServer(server, protocol, skipSslMessage = false) {
+function listenProxyServer(server, protocol) {
     server.on('error', (error) => {
         if (error.code === 'EADDRINUSE') {
-            console.error(`Proxy port ${proxyPort} is already in use.`);
-            console.error('Stop the existing watcher process or use a different STOREFRONT_PROXY_PORT.');
+            console.error(`[SidworksDevTools] Port ${proxyPort} is already in use. Stop the existing watcher or use a different STOREFRONT_PROXY_PORT.`);
             process.exit(1);
         }
 
-        console.error(`Unable to start ${protocol} proxy server:`, error);
+        console.error(`[SidworksDevTools] Unable to start ${protocol} proxy server:`, error);
         process.exit(1);
     });
 
-    server.listen(proxyPort, () => {
-        if (protocol === 'https') {
-            console.log(`[SidworksDevTools] ${tag('PROXY')} using HTTPS with SSL certificate files.`);
-            return;
-        }
-
-        console.log(`[SidworksDevTools] ${tag('PROXY')} using HTTP${skipSslMessage ? ' (SSL certificates are skipped).' : '.'}`);
-    });
+    server.listen(proxyPort);
 }

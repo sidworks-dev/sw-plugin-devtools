@@ -301,14 +301,11 @@ function loadPatchedWebpackConfig(explicitProjectRoot) {
         if (useSassEmbedded) {
             try {
                 sassImplementation = storefrontRequire('sass-embedded');
-                console.log('[SidworksDevTools] Using sass-embedded in hot mode');
             } catch (_error) {
                 try {
                     sassImplementation = runtimeRequire('sass-embedded');
-                    console.log('[SidworksDevTools] Using sass-embedded from runtime in hot mode');
                 } catch (_runtimeError) {
-                    console.log('[SidworksDevTools] sass-embedded not available, using sass');
-                    console.log('[SidworksDevTools] Install hint: npm --prefix vendor/shopware/storefront/Resources/app/storefront i -D sass-embedded');
+                    // sass-embedded not available, keep using sass
                 }
             }
         }
@@ -342,7 +339,6 @@ function loadPatchedWebpackConfig(explicitProjectRoot) {
 
     if (disableScss && coreConfig.entry && Object.prototype.hasOwnProperty.call(coreConfig.entry, 'hot-reloading')) {
         delete coreConfig.entry['hot-reloading'];
-        console.log('[SidworksDevTools] SCSS compilation disabled (--no-scss)');
     }
 
     if (disableJs) {
@@ -354,23 +350,18 @@ function loadPatchedWebpackConfig(explicitProjectRoot) {
         }
 
         coreConfig.entry = nextEntry;
-        console.log('[SidworksDevTools] JS compilation disabled (--no-js)');
     }
 
     if (useScssSidecar) {
         if (coreConfig.entry && Object.prototype.hasOwnProperty.call(coreConfig.entry, 'hot-reloading')) {
             delete coreConfig.entry['hot-reloading'];
         }
-        console.log('[SidworksDevTools] SCSS sidecar mode enabled (webpack SCSS entry disabled)');
         patchScssSidecarWatchBehavior(configArray);
         patchScssRulesToNoop(configArray);
-        console.log('[SidworksDevTools] SCSS sidecar mode: webpack SCSS imports disabled (handled by sidecar)');
-        console.log('[SidworksDevTools] SCSS sidecar mode: webpack ignores SCSS/SASS change events (JS rebuilds only on JS changes)');
     }
 
     if (disableTwig && coreConfig.devServer) {
         delete coreConfig.devServer.watchFiles;
-        console.log('[SidworksDevTools] Twig watch disabled (--no-twig)');
     }
 
     const assetPort = parseInt(process.env.STOREFRONT_ASSETS_PORT || '', 10) || 9999;
@@ -416,9 +407,7 @@ function loadPatchedWebpackConfig(explicitProjectRoot) {
 
     const effectiveConfigArray = coreOnlyHotMode ? [coreConfig] : configArray;
 
-    if (coreOnlyHotMode) {
-        console.log('[SidworksDevTools] Core-only hot mode enabled (plugin JS compilers disabled)');
-    }
+    // coreOnlyHotMode is reflected in the PHP startup overview
 
     if (!verboseWebpackOutput) {
         stripWebpackBarPlugins(effectiveConfigArray);

@@ -37,8 +37,16 @@ function toScssImportPath(filePath) {
     return String(filePath).replace(/\\/g, '/').replace(/"/g, '\\"');
 }
 
+const resolutionCache = new Map();
+
 function resolveScssCandidate(rawPath) {
     const normalizedPath = path.resolve(rawPath);
+
+    const cached = resolutionCache.get(normalizedPath);
+    if (cached !== undefined) {
+        return cached;
+    }
+
     const extension = path.extname(normalizedPath);
     const hasResolvableExtension = ['.scss', '.sass', '.css'].includes(extension);
     const dirname = path.dirname(normalizedPath);
@@ -64,6 +72,7 @@ function resolveScssCandidate(rawPath) {
     for (const candidate of candidates) {
         try {
             if (fs.statSync(candidate).isFile()) {
+                resolutionCache.set(normalizedPath, candidate);
                 return candidate;
             }
         } catch (_error) {
@@ -71,7 +80,34 @@ function resolveScssCandidate(rawPath) {
         }
     }
 
+    resolutionCache.set(normalizedPath, null);
     return null;
+}
+
+function invalidateResolutionCacheForChangedFiles(changedFiles, projectRoot) {
+    if (!changedFiles || changedFiles.length === 0) {
+        return;
+    }
+
+    const absolutePaths = new Set();
+    for (const file of changedFiles) {
+        if (typeof file !== 'string' || file === '') {
+            continue;
+        }
+
+        const abs = path.isAbsolute(file) ? file : path.resolve(projectRoot, file);
+        absolutePaths.add(abs);
+    }
+
+    if (absolutePaths.size === 0) {
+        return;
+    }
+
+    for (const [key, value] of resolutionCache) {
+        if (absolutePaths.has(key) || (value && absolutePaths.has(value))) {
+            resolutionCache.delete(key);
+        }
+    }
 }
 
 function toWatchedFilePath(item) {
@@ -131,6 +167,8 @@ function createScssSidecar(projectRoot) {
     const scssSourceMapEnabled = asString(process.env.SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP, '1') === '1';
     const silenceDeprecations = asString(process.env.SHOPWARE_STOREFRONT_SASS_SILENCE_DEPRECATIONS, '1') === '1';
 
+    const fileContentCache = new Map();
+
     const state = {
         subscribers: new Set(),
         watchpack: null,
@@ -173,20 +211,22 @@ function createScssSidecar(projectRoot) {
 
     function resolveSassImplementation() {
         try {
-            const embedded = storefrontRequire('sass-embedded');
-            console.log('[SidworksDevTools] SCSS sidecar uses sass-embedded from storefront');
-            return embedded;
+            return storefrontRequire('sass-embedded');
         } catch (_error) {
             try {
-                const embedded = runtimeRequire('sass-embedded');
-                console.log('[SidworksDevTools] SCSS sidecar uses sass-embedded from runtime');
-                return embedded;
+                return runtimeRequire('sass-embedded');
             } catch (_runtimeError) {
-                const sass = storefrontRequire('sass');
-                console.log('[SidworksDevTools] SCSS sidecar fallback: using sass');
-                return sass;
+                return storefrontRequire('sass');
             }
         }
+    }
+
+    function describeSassImplementation() {
+        const info = String(state.sassImplementation?.info || '').toLowerCase();
+        if (info.includes('sass-embedded')) {
+            return 'sass-embedded';
+        }
+        return 'sass';
     }
 
     function findTildeImport(url) {
@@ -331,10 +371,7 @@ function createScssSidecar(projectRoot) {
             writeGeneratedThemeEntry(generatedEntryContent);
             state.activeEntryPath = generatedThemeEntryPath;
 
-            if (!state.loggedGeneratedEntryInfo) {
-                console.log('[SidworksDevTools] SCSS sidecar uses generated entry from theme-files.json');
-                state.loggedGeneratedEntryInfo = true;
-            }
+            state.loggedGeneratedEntryInfo = true;
 
             return generatedThemeEntryPath;
         }
@@ -413,6 +450,9 @@ function createScssSidecar(projectRoot) {
     async function compileAndWatch(reason, changedFiles = []) {
         if (!state.sassImplementation) {
             state.sassImplementation = resolveSassImplementation();
+            const engine = describeSassImplementation();
+            const persistent = typeof state.sassImplementation.initAsyncCompiler === 'function' ? ', persistent' : '';
+            log.log(`${engine}${persistent}`);
         }
 
         const fileSummary = summarizeFiles(changedFiles);
@@ -431,6 +471,8 @@ function createScssSidecar(projectRoot) {
         }
 
         state.compileInFlight = true;
+        fileContentCache.clear();
+        invalidateResolutionCacheForChangedFiles(changedFiles, rootPath);
         const startedAt = Date.now();
         log.status('RUN', `compiling (${reasonLabel})`);
 
@@ -491,7 +533,6 @@ function createScssSidecar(projectRoot) {
         const sass = state.sassImplementation;
         if (typeof sass.initAsyncCompiler === 'function') {
             state.persistentCompiler = await sass.initAsyncCompiler();
-            console.log('[SidworksDevTools] SCSS persistent compiler initialized (Dart VM kept alive)');
             return state.persistentCompiler;
         }
 
@@ -545,7 +586,11 @@ function createScssSidecar(projectRoot) {
                 },
                 load(canonicalUrl) {
                     const resolvedPath = fileURLToPath(canonicalUrl);
-                    const contents = fs.readFileSync(resolvedPath, 'utf8');
+                    let contents = fileContentCache.get(resolvedPath);
+                    if (contents === undefined) {
+                        contents = fs.readFileSync(resolvedPath, 'utf8');
+                        fileContentCache.set(resolvedPath, contents);
+                    }
 
                     if (resolvedPath.endsWith('.sass')) {
                         return { contents, syntax: 'indented' };
