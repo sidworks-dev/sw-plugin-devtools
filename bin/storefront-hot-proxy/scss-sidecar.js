@@ -198,6 +198,46 @@ function invalidateResolutionCacheForChangedFiles(changedFiles, projectRoot) {
     }
 }
 
+function normalizeChangedFileToAbsolutePath(filePath, projectRoot) {
+    if (typeof filePath !== 'string' || filePath === '') {
+        return null;
+    }
+
+    if (filePath.startsWith('~')) {
+        return path.resolve(projectRoot, filePath.slice(1));
+    }
+
+    if (path.isAbsolute(filePath)) {
+        return path.resolve(filePath);
+    }
+
+    return path.resolve(projectRoot, filePath);
+}
+
+function invalidateFileContentCacheForChangedFiles(changedFiles, projectRoot, fileContentCache) {
+    if (!changedFiles || changedFiles.length === 0 || !fileContentCache || fileContentCache.size === 0) {
+        return;
+    }
+
+    const absolutePaths = new Set();
+    for (const file of changedFiles) {
+        const absolutePath = normalizeChangedFileToAbsolutePath(file, projectRoot);
+        if (absolutePath) {
+            absolutePaths.add(absolutePath);
+        }
+    }
+
+    if (absolutePaths.size === 0) {
+        return;
+    }
+
+    for (const cachedPath of fileContentCache.keys()) {
+        if (absolutePaths.has(cachedPath)) {
+            fileContentCache.delete(cachedPath);
+        }
+    }
+}
+
 function toWatchedFilePath(item) {
     if (typeof item === 'string') {
         return item;
@@ -253,6 +293,7 @@ function createScssSidecar(projectRoot) {
     const cssOutputPath = path.resolve(generatedEntryDirectoryPath, HOT_CSS_FILE_NAME);
     const cssMapOutputPath = path.resolve(generatedEntryDirectoryPath, HOT_CSS_MAP_FILE_NAME);
     const scssSourceMapEnabled = asString(process.env.SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP, '1') === '1';
+    const scssSourceMapIncludeSources = asString(process.env.SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP_INCLUDE_SOURCES, '0') === '1';
     const silenceDeprecations = asString(process.env.SHOPWARE_STOREFRONT_SASS_SILENCE_DEPRECATIONS, '1') === '1';
 
     const fileContentCache = new Map();
@@ -447,6 +488,7 @@ function createScssSidecar(projectRoot) {
 
         if (currentContent !== content) {
             fs.writeFileSync(generatedThemeEntryPath, content, 'utf8');
+            fileContentCache.delete(generatedThemeEntryPath);
         }
     }
 
@@ -559,7 +601,7 @@ function createScssSidecar(projectRoot) {
         }
 
         state.compileInFlight = true;
-        fileContentCache.clear();
+        invalidateFileContentCacheForChangedFiles(changedFiles, rootPath, fileContentCache);
         invalidateResolutionCacheForChangedFiles(changedFiles, rootPath);
         const startedAt = Date.now();
         log.status('RUN', `compiling (${reasonLabel})`);
@@ -656,7 +698,7 @@ function createScssSidecar(projectRoot) {
 
         const result = await compile(entryPath, {
             sourceMap: scssSourceMapEnabled,
-            sourceMapIncludeSources: scssSourceMapEnabled,
+            sourceMapIncludeSources: scssSourceMapEnabled && scssSourceMapIncludeSources,
             style: 'expanded',
             quietDeps: true,
             loadPaths: shared.loadPaths,
@@ -719,7 +761,7 @@ function createScssSidecar(projectRoot) {
                 file: entryPath,
                 outFile: cssOutputPath,
                 sourceMap: scssSourceMapEnabled,
-                sourceMapContents: scssSourceMapEnabled,
+                sourceMapContents: scssSourceMapEnabled && scssSourceMapIncludeSources,
                 outputStyle: 'expanded',
                 quietDeps: true,
                 includePaths: shared.loadPaths,
