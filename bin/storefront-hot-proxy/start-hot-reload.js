@@ -21,6 +21,7 @@ const { createProxyMiddleware } = storefrontRequire('http-proxy-middleware');
 
 process.env.NODE_ENV = process.env.NODE_ENV || 'development';
 process.env.MODE = process.env.MODE || 'hot';
+process.noDeprecation = true;
 
 const proxyPort = Number(process.env.STOREFRONT_PROXY_PORT) || 9998;
 const assetPort = Number(process.env.STOREFRONT_ASSETS_PORT) || 9999;

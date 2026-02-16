@@ -25,6 +25,94 @@ const HOT_CSS_ROUTE = `${HOT_CSS_BASE_PATH}/${HOT_CSS_FILE_NAME}`;
 const HOT_CSS_MAP_ROUTE = `${HOT_CSS_BASE_PATH}/${HOT_CSS_MAP_FILE_NAME}`;
 const HOT_CSS_EVENTS_ROUTE = `${HOT_CSS_BASE_PATH}/events`;
 
+function appendSourceMapComment(cssContent, mapFileName) {
+    const normalizedCss = String(cssContent || '').replace(/\/\*# sourceMappingURL=.*?\*\//g, '').trimEnd();
+    const normalizedMapFile = String(mapFileName || '').trim();
+
+    if (normalizedMapFile === '') {
+        return normalizedCss;
+    }
+
+    return `${normalizedCss}\n/*# sourceMappingURL=${normalizedMapFile} */\n`;
+}
+
+function normalizeSourceMapForDisplay(mapContent, projectRootPath) {
+    if (typeof mapContent !== 'string' || mapContent.trim() === '') {
+        return '';
+    }
+
+    let parsedMap;
+    try {
+        parsedMap = JSON.parse(mapContent);
+    } catch (_error) {
+        return mapContent;
+    }
+
+    if (!parsedMap || typeof parsedMap !== 'object' || !Array.isArray(parsedMap.sources)) {
+        return mapContent;
+    }
+
+    parsedMap.sources = parsedMap.sources.map((source) => normalizeSourceMapSource(source, projectRootPath));
+
+    if (typeof parsedMap.sourceRoot === 'string' && parsedMap.sourceRoot.startsWith('file://')) {
+        parsedMap.sourceRoot = '';
+    }
+
+    return JSON.stringify(parsedMap);
+}
+
+function normalizeSourceMapSource(source, projectRootPath) {
+    if (typeof source !== 'string' || source === '') {
+        return source;
+    }
+
+    const projectRoot = path.resolve(projectRootPath);
+    const projectRootPrefix = `${projectRoot}${path.sep}`;
+
+    if (source.startsWith('file://')) {
+        try {
+            const absolutePath = path.resolve(fileURLToPath(source));
+            const normalizedAbsolute = absolutePath.replace(/\\/g, '/');
+
+            if (normalizedAbsolute.startsWith('/var/www/html/')) {
+                return toRootAbsoluteDisplayPath(normalizedAbsolute.slice('/var/www/html/'.length));
+            }
+
+            if (absolutePath === projectRoot || absolutePath.startsWith(projectRootPrefix)) {
+                return toRootAbsoluteDisplayPath(path.relative(projectRoot, absolutePath).replace(/\\/g, '/'));
+            }
+
+            return normalizedAbsolute;
+        } catch (_error) {
+            return source;
+        }
+    }
+
+    if (path.isAbsolute(source)) {
+        const absolutePath = path.resolve(source);
+        if (absolutePath === projectRoot || absolutePath.startsWith(projectRootPrefix)) {
+            return toRootAbsoluteDisplayPath(path.relative(projectRoot, absolutePath).replace(/\\/g, '/'));
+        }
+    }
+
+    return toRootAbsoluteDisplayPath(source);
+}
+
+function toRootAbsoluteDisplayPath(pathValue) {
+    const normalizedPath = String(pathValue || '').replace(/\\/g, '/');
+    if (
+        normalizedPath === ''
+        || normalizedPath.startsWith('/')
+        || normalizedPath.startsWith('./')
+        || normalizedPath.startsWith('../')
+        || /^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(normalizedPath)
+    ) {
+        return normalizedPath;
+    }
+
+    return `/${normalizedPath}`;
+}
+
 function readJsonFile(filePath, fallbackValue = null) {
     try {
         return JSON.parse(fs.readFileSync(filePath, 'utf8'));
@@ -485,10 +573,16 @@ function createScssSidecar(projectRoot) {
             const result = await compileSass(compileEntryPath);
 
             await fs.promises.mkdir(path.dirname(cssOutputPath), { recursive: true });
-            await fs.promises.writeFile(cssOutputPath, result.css || '', 'utf8');
+            const normalizedMap = normalizeSourceMapForDisplay(result.map || '', rootPath);
 
-            if (scssSourceMapEnabled && typeof result.map === 'string' && result.map !== '') {
-                await fs.promises.writeFile(cssMapOutputPath, result.map, 'utf8');
+            let cssOutput = result.css || '';
+            if (scssSourceMapEnabled && normalizedMap !== '') {
+                cssOutput = appendSourceMapComment(cssOutput, HOT_CSS_MAP_FILE_NAME);
+            }
+            await fs.promises.writeFile(cssOutputPath, cssOutput, 'utf8');
+
+            if (scssSourceMapEnabled && normalizedMap !== '') {
+                await fs.promises.writeFile(cssMapOutputPath, normalizedMap, 'utf8');
             } else if (fs.existsSync(cssMapOutputPath)) {
                 await fs.promises.unlink(cssMapOutputPath);
             }

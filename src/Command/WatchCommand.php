@@ -414,10 +414,12 @@ class WatchCommand extends Command
             'SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP',
             $scssEngine === 'sass-cli' ? '1' : '0'
         );
+        $nodeOptions = $this->appendNodeOption($this->env('NODE_OPTIONS', ''), '--no-deprecation');
 
         $environment = [
             'PROJECT_ROOT' => $projectRoot,
             'NODE_ENV' => $this->env('NODE_ENV', 'development'),
+            'NODE_OPTIONS' => $nodeOptions,
             'MODE' => $this->env('MODE', 'hot'),
             'NPM_CONFIG_FUND' => 'false',
             'NPM_CONFIG_AUDIT' => 'false',
@@ -571,6 +573,21 @@ class WatchCommand extends Command
         }
 
         return (string) $value;
+    }
+
+    private function appendNodeOption(string $options, string $option): string
+    {
+        $normalized = trim($options);
+        if ($normalized === '') {
+            return $option;
+        }
+
+        $parts = preg_split('/\s+/', $normalized);
+        if (\is_array($parts) && \in_array($option, $parts, true)) {
+            return $normalized;
+        }
+
+        return $normalized . ' ' . $option;
     }
 
     private function resolveScssEngine(): string
