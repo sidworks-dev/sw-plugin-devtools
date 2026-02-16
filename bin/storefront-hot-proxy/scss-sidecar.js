@@ -139,6 +139,7 @@ function createScssSidecar(projectRoot) {
         compileTimer: null,
         version: Date.now(),
         sassImplementation: null,
+        persistentCompiler: null,
         aliasMap: {},
         activeEntryPath: null,
         loggedGeneratedEntryInfo: false,
@@ -482,12 +483,27 @@ function createScssSidecar(projectRoot) {
         };
     }
 
+    async function ensurePersistentCompiler() {
+        if (state.persistentCompiler) {
+            return state.persistentCompiler;
+        }
+
+        const sass = state.sassImplementation;
+        if (typeof sass.initAsyncCompiler === 'function') {
+            state.persistentCompiler = await sass.initAsyncCompiler();
+            console.log('[SidworksDevTools] SCSS persistent compiler initialized (Dart VM kept alive)');
+            return state.persistentCompiler;
+        }
+
+        return null;
+    }
+
     async function compileSass(entryPath) {
         const sass = state.sassImplementation;
-        const hasModernApi = typeof sass.compileAsync === 'function';
 
-        if (hasModernApi) {
-            return compileWithModernApi(entryPath);
+        if (typeof sass.compileAsync === 'function') {
+            const compiler = await ensurePersistentCompiler();
+            return compileWithModernApi(entryPath, compiler);
         }
 
         if (typeof sass.render === 'function') {
@@ -497,10 +513,13 @@ function createScssSidecar(projectRoot) {
         throw new Error('Sass implementation has no compileAsync() or render() API');
     }
 
-    async function compileWithModernApi(entryPath) {
+    async function compileWithModernApi(entryPath, compiler) {
         const shared = getSharedCompileOptions();
+        const compile = compiler
+            ? (file, opts) => compiler.compileAsync(file, opts)
+            : (file, opts) => state.sassImplementation.compileAsync(file, opts);
 
-        const result = await state.sassImplementation.compileAsync(entryPath, {
+        const result = await compile(entryPath, {
             sourceMap: scssSourceMapEnabled,
             sourceMapIncludeSources: scssSourceMapEnabled,
             style: 'expanded',
@@ -704,6 +723,11 @@ function createScssSidecar(projectRoot) {
         if (state.compileTimer) {
             clearTimeout(state.compileTimer);
             state.compileTimer = null;
+        }
+
+        if (state.persistentCompiler) {
+            state.persistentCompiler.dispose();
+            state.persistentCompiler = null;
         }
 
         if (state.watchpack) {
