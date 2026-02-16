@@ -6,14 +6,15 @@ const {
     resolveProjectRoot,
     createStorefrontRequire,
 } = require('./runtime-paths');
+const {
+    ANSI,
+    colorize,
+    formatFilePath,
+    summarizeFiles,
+    createLogger,
+} = require('./utils');
 
-const ANSI = {
-    reset: '\x1b[0m',
-    red: '\x1b[31m',
-    green: '\x1b[32m',
-    yellow: '\x1b[33m',
-    cyan: '\x1b[36m',
-};
+const jsLog = createLogger('JS');
 
 module.exports = function createLiveReloadServer(sslOptions) {
     return new Promise((resolve, reject) => {
@@ -32,14 +33,9 @@ module.exports = function createLiveReloadServer(sslOptions) {
             attachCompileFeedback(compiler, projectRoot);
         }
 
-        let serverConfig = {
-            type: 'http',
-        };
+        let serverConfig = { type: 'http' };
         if (Object.keys(sslOptions).length !== 0) {
-            serverConfig = {
-                type: 'https',
-                options: sslOptions,
-            };
+            serverConfig = { type: 'https', options: sslOptions };
         }
 
         const baseDevServer = coreWebpackConfig.devServer || {};
@@ -84,7 +80,7 @@ function attachCompileFeedback(compiler, projectRoot) {
     };
 
     compiler.hooks.invalid.tap('SidworksCompileFeedback', (changedFile) => {
-        const shortFile = formatChangedFile(changedFile, projectRoot);
+        const shortFile = formatFilePath(changedFile, projectRoot);
         if (shortFile) {
             state.pendingChangedFiles.add(shortFile);
         }
@@ -99,7 +95,7 @@ function attachCompileFeedback(compiler, projectRoot) {
             state.waitLogged = false;
             const changedSummary = summarizeFiles([...state.pendingChangedFiles]);
             state.activeReasonLabel = changedSummary ? `change: ${changedSummary}` : 'change';
-            logJs(`${colorize('[RUN]', ANSI.yellow)} compiling (${state.activeReasonLabel})`);
+            jsLog.status('RUN', `compiling (${state.activeReasonLabel})`);
             return;
         }
 
@@ -108,11 +104,7 @@ function attachCompileFeedback(compiler, projectRoot) {
         }
 
         const queuedFiles = summarizeFiles([...state.pendingChangedFiles]);
-        if (queuedFiles) {
-            logJs(`${colorize('[WAIT]', ANSI.yellow)} change queued while compile is running (${queuedFiles})`);
-        } else {
-            logJs(`${colorize('[WAIT]', ANSI.yellow)} change queued while compile is running`);
-        }
+        jsLog.status('WAIT', `change queued while compile is running${queuedFiles ? ` (${queuedFiles})` : ''}`);
         state.waitLogged = true;
     });
 
@@ -131,64 +123,15 @@ function attachCompileFeedback(compiler, projectRoot) {
         if (stats?.hasErrors && stats.hasErrors()) {
             const errorMessage = summarizeFirstError(stats);
             const suffix = errorMessage ? `: ${errorMessage}` : '';
-            logJsError(`${colorize('[ERR]', ANSI.red)} compile failed (${state.activeReasonLabel}) after ${duration}ms${suffix}`);
+            jsLog.status('ERR', `compile failed (${state.activeReasonLabel}) after ${duration}ms${suffix}`, true);
         } else {
-            logJs(`${colorize('[OK]', ANSI.green)} compiled (${state.activeReasonLabel}) in ${duration}ms`);
+            jsLog.status('OK', `compiled (${state.activeReasonLabel}) in ${duration}ms`);
         }
 
         state.compileInFlight = false;
         state.waitLogged = false;
         state.pendingChangedFiles.clear();
     });
-}
-
-function formatChangedFile(changedFile, projectRoot) {
-    if (typeof changedFile !== 'string' || changedFile === '') {
-        return '';
-    }
-
-    const normalizedRoot = path.resolve(projectRoot);
-    const normalizedFile = path.resolve(changedFile);
-    if (normalizedFile.startsWith(normalizedRoot + path.sep)) {
-        return path.relative(normalizedRoot, normalizedFile).replace(/\\/g, '/');
-    }
-
-    return changedFile.replace(/\\/g, '/');
-}
-
-function summarizeFiles(files) {
-    const uniqueFiles = [...new Set((files || []).filter((file) => typeof file === 'string' && file !== ''))];
-    if (uniqueFiles.length === 0) {
-        return '';
-    }
-
-    if (uniqueFiles.length <= 3) {
-        return uniqueFiles.join(', ');
-    }
-
-    return `${uniqueFiles.slice(0, 3).join(', ')} +${uniqueFiles.length - 3} more`;
-}
-
-function hasInteractiveTty() {
-    return Boolean(process.stdout && process.stdout.isTTY);
-}
-
-function colorize(text, colorCode) {
-    if (!hasInteractiveTty()) {
-        return text;
-    }
-
-    return `${colorCode}${text}${ANSI.reset}`;
-}
-
-function logJs(message) {
-    const tag = colorize('[JS]', ANSI.cyan);
-    console.log(`[SidworksDevTools] ${tag} ${message}`);
-}
-
-function logJsError(message) {
-    const tag = colorize('[JS]', ANSI.cyan);
-    console.error(`[SidworksDevTools] ${tag} ${message}`);
 }
 
 function getCompileDurationMs(stats, startedAt) {
@@ -217,20 +160,9 @@ function summarizeFirstError(stats) {
             return '';
         }
 
-        if (typeof firstError === 'string') {
-            return compactLine(firstError);
-        }
-
-        if (typeof firstError.message === 'string') {
-            return compactLine(firstError.message);
-        }
-
-        return '';
+        const message = typeof firstError === 'string' ? firstError : (firstError.message || '');
+        return String(message).replace(/\s+/g, ' ').trim().slice(0, 220);
     } catch (_error) {
         return '';
     }
-}
-
-function compactLine(value) {
-    return String(value || '').replace(/\s+/g, ' ').trim().slice(0, 220);
 }

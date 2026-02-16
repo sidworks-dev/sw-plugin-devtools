@@ -10,6 +10,13 @@ const {
     resolveStorefrontApp,
     createStorefrontRequire,
 } = require('./runtime-paths');
+const {
+    asString,
+    formatFilePath,
+    summarizeFiles,
+    getSassDeprecationsToSilence,
+    createLogger,
+} = require('./utils');
 
 const HOT_CSS_BASE_PATH = '/_sidworks_hot';
 const HOT_CSS_FILE_NAME = 'sidworks-hot.css';
@@ -18,45 +25,7 @@ const HOT_CSS_ROUTE = `${HOT_CSS_BASE_PATH}/${HOT_CSS_FILE_NAME}`;
 const HOT_CSS_MAP_ROUTE = `${HOT_CSS_BASE_PATH}/${HOT_CSS_MAP_FILE_NAME}`;
 const HOT_CSS_EVENTS_ROUTE = `${HOT_CSS_BASE_PATH}/events`;
 
-const sassDeprecations = ['import', 'global-builtin', 'color-functions', 'slash-div', 'legacy-js-api'];
-const ANSI = {
-    reset: '\x1b[0m',
-    gray: '\x1b[90m',
-    red: '\x1b[31m',
-    green: '\x1b[32m',
-    yellow: '\x1b[33m',
-    cyan: '\x1b[36m',
-};
-
-function asString(value, defaultValue) {
-    if (typeof value === 'undefined' || value === null || value === '') {
-        return defaultValue;
-    }
-
-    return String(value);
-}
-
-function toFilePath(urlValue) {
-    if (!urlValue || typeof urlValue !== 'object') {
-        return null;
-    }
-
-    if (urlValue.protocol !== 'file:') {
-        return null;
-    }
-
-    try {
-        return fileURLToPath(urlValue);
-    } catch (_error) {
-        return null;
-    }
-}
-
 function readJsonFile(filePath, fallbackValue = null) {
-    if (!fs.existsSync(filePath)) {
-        return fallbackValue;
-    }
-
     try {
         return JSON.parse(fs.readFileSync(filePath, 'utf8'));
     } catch (_error) {
@@ -76,27 +45,29 @@ function resolveScssCandidate(rawPath) {
     const basename = path.basename(normalizedPath);
     const basenameWithoutExtension = extension ? basename.slice(0, -extension.length) : basename;
 
-    const candidates = [];
-    if (hasResolvableExtension) {
-        candidates.push(normalizedPath);
-        candidates.push(path.join(dirname, `_${basename}`));
-    } else {
-        candidates.push(normalizedPath);
-        candidates.push(`${normalizedPath}.scss`);
-        candidates.push(`${normalizedPath}.sass`);
-        candidates.push(`${normalizedPath}.css`);
-        candidates.push(path.join(dirname, `_${basenameWithoutExtension}.scss`));
-        candidates.push(path.join(dirname, `_${basenameWithoutExtension}.sass`));
-        candidates.push(path.join(dirname, `_${basenameWithoutExtension}.css`));
-        candidates.push(path.join(normalizedPath, 'index.scss'));
-        candidates.push(path.join(normalizedPath, '_index.scss'));
-        candidates.push(path.join(normalizedPath, 'index.css'));
-        candidates.push(path.join(normalizedPath, '_index.css'));
-    }
+    const candidates = hasResolvableExtension
+        ? [normalizedPath, path.join(dirname, `_${basename}`)]
+        : [
+            normalizedPath,
+            `${normalizedPath}.scss`,
+            `${normalizedPath}.sass`,
+            `${normalizedPath}.css`,
+            path.join(dirname, `_${basenameWithoutExtension}.scss`),
+            path.join(dirname, `_${basenameWithoutExtension}.sass`),
+            path.join(dirname, `_${basenameWithoutExtension}.css`),
+            path.join(normalizedPath, 'index.scss'),
+            path.join(normalizedPath, '_index.scss'),
+            path.join(normalizedPath, 'index.css'),
+            path.join(normalizedPath, '_index.css'),
+        ];
 
     for (const candidate of candidates) {
-        if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
-            return candidate;
+        try {
+            if (fs.statSync(candidate).isFile()) {
+                return candidate;
+            }
+        } catch (_error) {
+            // not found
         }
     }
 
@@ -104,15 +75,19 @@ function resolveScssCandidate(rawPath) {
 }
 
 function toWatchedFilePath(item) {
-    if (!item) {
-        return null;
-    }
-
     if (typeof item === 'string') {
         return item;
     }
 
-    return toFilePath(item);
+    if (item && typeof item === 'object' && item.protocol === 'file:') {
+        try {
+            return fileURLToPath(item);
+        } catch (_error) {
+            // invalid URL
+        }
+    }
+
+    return null;
 }
 
 function resolveAliasMap(themeFiles) {
@@ -142,6 +117,7 @@ function createScssSidecar(projectRoot) {
     const storefrontRequire = createStorefrontRequire(rootPath);
     const runtimeRequire = createRequire(__filename);
     const Watchpack = storefrontRequire('watchpack');
+    const log = createLogger('SCSS');
 
     const themeFilesConfigPath = path.resolve(rootPath, 'var/theme-files.json');
     const themeEntryPath = path.resolve(rootPath, 'var/theme-entry.scss');
@@ -153,6 +129,7 @@ function createScssSidecar(projectRoot) {
     const cssOutputPath = path.resolve(generatedEntryDirectoryPath, HOT_CSS_FILE_NAME);
     const cssMapOutputPath = path.resolve(generatedEntryDirectoryPath, HOT_CSS_MAP_FILE_NAME);
     const scssSourceMapEnabled = asString(process.env.SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP, '1') === '1';
+    const silenceDeprecations = asString(process.env.SHOPWARE_STOREFRONT_SASS_SILENCE_DEPRECATIONS, '1') === '1';
 
     const state = {
         subscribers: new Set(),
@@ -169,80 +146,8 @@ function createScssSidecar(projectRoot) {
         pendingTriggerType: '',
     };
 
-    function hasInteractiveTty() {
-        return Boolean(process.stdout && process.stdout.isTTY);
-    }
-
-    function colorize(text, colorCode) {
-        if (!hasInteractiveTty()) {
-            return text;
-        }
-
-        return `${colorCode}${text}${ANSI.reset}`;
-    }
-
-    function logScss(message) {
-        const tag = colorize('[SCSS]', ANSI.cyan);
-        console.log(`[SidworksDevTools] ${tag} ${message}`);
-    }
-
-    function logScssError(message) {
-        const tag = colorize('[SCSS]', ANSI.cyan);
-        console.error(`[SidworksDevTools] ${tag} ${message}`);
-    }
-
-    function startCompileIndicator(reason) {
-        const status = colorize('[RUN]', ANSI.yellow);
-        logScss(`${status} compiling (${reason})`);
-    }
-
-    function stopCompileIndicator(success, reason, duration, errorMessage) {
-        if (success) {
-            const status = colorize('[OK]', ANSI.green);
-            logScss(`${status} compiled (${reason}) in ${duration}ms`);
-            return;
-        }
-
-        const status = colorize('[ERR]', ANSI.red);
-        logScssError(`${status} compile failed (${reason}) after ${duration}ms: ${errorMessage}`);
-    }
-
-    function formatChangedFilePath(filePath) {
-        if (typeof filePath !== 'string' || filePath.trim() === '') {
-            return '';
-        }
-
-        const absoluteRoot = path.resolve(rootPath);
-        const absoluteFile = path.resolve(filePath);
-        if (absoluteFile.startsWith(absoluteRoot + path.sep)) {
-            return path.relative(absoluteRoot, absoluteFile).replace(/\\/g, '/');
-        }
-
-        return filePath.replace(/\\/g, '/');
-    }
-
-    function summarizeChangedFiles(files) {
-        if (!Array.isArray(files) || files.length === 0) {
-            return '';
-        }
-
-        const normalizedFiles = files
-            .map(formatChangedFilePath)
-            .filter((item) => item !== '');
-
-        if (normalizedFiles.length === 0) {
-            return '';
-        }
-
-        if (normalizedFiles.length === 1) {
-            return normalizedFiles[0];
-        }
-
-        if (normalizedFiles.length <= 3) {
-            return normalizedFiles.join(', ');
-        }
-
-        return `${normalizedFiles.slice(0, 3).join(', ')} +${normalizedFiles.length - 3} more`;
+    function formatPath(filePath) {
+        return formatFilePath(filePath, rootPath);
     }
 
     function rememberPendingTrigger(triggerType, changedFile) {
@@ -250,9 +155,9 @@ function createScssSidecar(projectRoot) {
             state.pendingTriggerType = triggerType;
         }
 
-        const normalizedPath = formatChangedFilePath(changedFile);
-        if (normalizedPath !== '') {
-            state.pendingChangedFiles.add(normalizedPath);
+        const normalized = formatPath(changedFile);
+        if (normalized !== '') {
+            state.pendingChangedFiles.add(normalized);
         }
     }
 
@@ -262,10 +167,7 @@ function createScssSidecar(projectRoot) {
         state.pendingTriggerType = '';
         state.pendingChangedFiles.clear();
 
-        return {
-            reason,
-            changedFiles,
-        };
+        return { reason, changedFiles };
     }
 
     function resolveSassImplementation() {
@@ -284,17 +186,6 @@ function createScssSidecar(projectRoot) {
                 return sass;
             }
         }
-    }
-
-    function resolveSilencedDeprecations() {
-        const silenced = [...sassDeprecations];
-        const info = String(state.sassImplementation?.info || '').toLowerCase();
-
-        if (!info.includes('sass-embedded')) {
-            silenced.push('mixed-decls');
-        }
-
-        return silenced;
     }
 
     function findTildeImport(url) {
@@ -416,17 +307,13 @@ function createScssSidecar(projectRoot) {
     }
 
     function writeGeneratedThemeEntry(content) {
-        fs.mkdirSync(generatedEntryDirectoryPath, {
-            recursive: true,
-        });
+        fs.mkdirSync(generatedEntryDirectoryPath, { recursive: true });
 
         let currentContent = null;
-        if (fs.existsSync(generatedThemeEntryPath)) {
-            try {
-                currentContent = fs.readFileSync(generatedThemeEntryPath, 'utf8');
-            } catch (_error) {
-                currentContent = null;
-            }
+        try {
+            currentContent = fs.readFileSync(generatedThemeEntryPath, 'utf8');
+        } catch (_error) {
+            // file doesn't exist yet
         }
 
         if (currentContent !== content) {
@@ -502,10 +389,9 @@ function createScssSidecar(projectRoot) {
 
         loadedFiles.push(entryPath || state.activeEntryPath || themeEntryPath);
         loadedFiles.push(themeFilesConfigPath, featureConfigPath, themeConfigPath, fallbackThemeVariablesPath);
-        const uniqueFiles = [...new Set(loadedFiles)];
 
         const watcher = ensureWatchpack();
-        watcher.watch(uniqueFiles, [], Date.now() - 1000);
+        watcher.watch([...new Set(loadedFiles)], [], Date.now() - 1000);
     }
 
     function broadcastCssUpdate() {
@@ -528,7 +414,7 @@ function createScssSidecar(projectRoot) {
             state.sassImplementation = resolveSassImplementation();
         }
 
-        const fileSummary = summarizeChangedFiles(changedFiles);
+        const fileSummary = summarizeFiles(changedFiles);
         const reasonLabel = fileSummary ? `${reason}: ${fileSummary}` : reason;
 
         if (state.compileInFlight) {
@@ -537,12 +423,7 @@ function createScssSidecar(projectRoot) {
             }
 
             if (!state.compileQueued) {
-                const queuedFiles = summarizeChangedFiles([...state.pendingChangedFiles]);
-                console.log(
-                    queuedFiles
-                        ? `[SidworksDevTools] ${colorize('[SCSS]', ANSI.cyan)} ${colorize('[WAIT]', ANSI.yellow)} change queued while compile is running (${queuedFiles})`
-                        : `[SidworksDevTools] ${colorize('[SCSS]', ANSI.cyan)} ${colorize('[WAIT]', ANSI.yellow)} change queued while compile is running`,
-                );
+                log.status('WAIT', `change queued while compile is running${state.pendingChangedFiles.size > 0 ? ` (${summarizeFiles([...state.pendingChangedFiles])})` : ''}`);
             }
             state.compileQueued = true;
             return;
@@ -550,7 +431,7 @@ function createScssSidecar(projectRoot) {
 
         state.compileInFlight = true;
         const startedAt = Date.now();
-        startCompileIndicator(reasonLabel);
+        log.status('RUN', `compiling (${reasonLabel})`);
 
         try {
             const compileEntryPath = resolveCompileEntryPath();
@@ -558,12 +439,11 @@ function createScssSidecar(projectRoot) {
                 throw new Error('No SCSS entry found. Expected var/theme-files.json or var/theme-entry.scss');
             }
 
-            const result = await compileWithLegacyImporter(compileEntryPath);
+            const result = await compileSass(compileEntryPath);
 
-            await fs.promises.mkdir(path.dirname(cssOutputPath), {
-                recursive: true,
-            });
+            await fs.promises.mkdir(path.dirname(cssOutputPath), { recursive: true });
             await fs.promises.writeFile(cssOutputPath, result.css || '', 'utf8');
+
             if (scssSourceMapEnabled && typeof result.map === 'string' && result.map !== '') {
                 await fs.promises.writeFile(cssMapOutputPath, result.map, 'utf8');
             } else if (fs.existsSync(cssMapOutputPath)) {
@@ -573,10 +453,9 @@ function createScssSidecar(projectRoot) {
             state.version = Date.now();
             updateWatchSet(result.loadedFiles, compileEntryPath);
             broadcastCssUpdate();
-            stopCompileIndicator(true, reasonLabel, Date.now() - startedAt, '');
+            log.status('OK', `compiled (${reasonLabel}) in ${Date.now() - startedAt}ms`);
         } catch (error) {
-            const errorMessage = error?.message || String(error);
-            stopCompileIndicator(false, reasonLabel, Date.now() - startedAt, errorMessage);
+            log.status('ERR', `compile failed (${reasonLabel}) after ${Date.now() - startedAt}ms: ${error?.message || error}`, true);
         } finally {
             state.compileInFlight = false;
 
@@ -587,13 +466,97 @@ function createScssSidecar(projectRoot) {
         }
     }
 
-    function compileWithLegacyImporter(entryPath) {
-        return new Promise((resolve, reject) => {
-            if (typeof state.sassImplementation.render !== 'function') {
-                reject(new Error('Sass implementation does not expose render() API'));
-                return;
-            }
+    function getSharedCompileOptions() {
+        const deprecations = silenceDeprecations
+            ? getSassDeprecationsToSilence(state.sassImplementation)
+            : [];
 
+        return {
+            loadPaths: [
+                path.resolve(storefrontApp, 'node_modules'),
+                path.resolve(storefrontApp, 'vendor'),
+                storefrontApp,
+                rootPath,
+            ],
+            silenceDeprecations: deprecations,
+        };
+    }
+
+    async function compileSass(entryPath) {
+        const sass = state.sassImplementation;
+        const hasModernApi = typeof sass.compileAsync === 'function';
+
+        if (hasModernApi) {
+            return compileWithModernApi(entryPath);
+        }
+
+        if (typeof sass.render === 'function') {
+            return compileWithLegacyApi(entryPath);
+        }
+
+        throw new Error('Sass implementation has no compileAsync() or render() API');
+    }
+
+    async function compileWithModernApi(entryPath) {
+        const shared = getSharedCompileOptions();
+
+        const result = await state.sassImplementation.compileAsync(entryPath, {
+            sourceMap: scssSourceMapEnabled,
+            sourceMapIncludeSources: scssSourceMapEnabled,
+            style: 'expanded',
+            quietDeps: true,
+            loadPaths: shared.loadPaths,
+            silenceDeprecations: shared.silenceDeprecations,
+            importers: [{
+                canonicalize(url, context) {
+                    const tildeResult = findTildeImport(url);
+                    if (tildeResult) {
+                        return tildeResult;
+                    }
+
+                    if (context.containingUrl) {
+                        const containingDir = path.dirname(fileURLToPath(context.containingUrl));
+                        const resolved = resolveScssCandidate(path.resolve(containingDir, url));
+                        if (resolved) {
+                            return pathToFileURL(resolved);
+                        }
+                    }
+
+                    return null;
+                },
+                load(canonicalUrl) {
+                    const resolvedPath = fileURLToPath(canonicalUrl);
+                    const contents = fs.readFileSync(resolvedPath, 'utf8');
+
+                    if (resolvedPath.endsWith('.sass')) {
+                        return { contents, syntax: 'indented' };
+                    }
+
+                    if (resolvedPath.endsWith('.css')) {
+                        return { contents, syntax: 'css' };
+                    }
+
+                    return { contents, syntax: 'scss' };
+                },
+            }],
+        });
+
+        let map = '';
+        if (scssSourceMapEnabled && result.sourceMap) {
+            map = JSON.stringify(result.sourceMap);
+        }
+
+        const loadedFiles = Array.isArray(result.loadedUrls)
+            ? result.loadedUrls.map(toWatchedFilePath).filter(Boolean)
+            : [];
+
+        return { css: result.css, map, loadedFiles };
+    }
+
+    function compileWithLegacyApi(entryPath) {
+        const shared = getSharedCompileOptions();
+
+        return new Promise((resolve, reject) => {
             state.sassImplementation.render({
                 file: entryPath,
                 outFile: cssOutputPath,
@@ -601,15 +564,8 @@ function createScssSidecar(projectRoot) {
                 sourceMapContents: scssSourceMapEnabled,
                 outputStyle: 'expanded',
                 quietDeps: true,
-                includePaths: [
-                    path.resolve(storefrontApp, 'node_modules'),
-                    path.resolve(storefrontApp, 'vendor'),
-                    storefrontApp,
-                    rootPath,
-                ],
-                silenceDeprecations: asString(process.env.SHOPWARE_STOREFRONT_SASS_SILENCE_DEPRECATIONS, '1') === '1'
-                    ? resolveSilencedDeprecations()
-                    : [],
+                includePaths: shared.loadPaths,
+                silenceDeprecations: shared.silenceDeprecations,
                 importer(url) {
                     const resolvedUrl = findTildeImport(url);
                     if (!resolvedUrl) {
@@ -618,14 +574,10 @@ function createScssSidecar(projectRoot) {
 
                     const resolvedPath = fileURLToPath(resolvedUrl);
                     if (resolvedPath.endsWith('.css')) {
-                        return {
-                            contents: fs.readFileSync(resolvedPath, 'utf8'),
-                        };
+                        return { contents: fs.readFileSync(resolvedPath, 'utf8') };
                     }
 
-                    return {
-                        file: resolvedPath,
-                    };
+                    return { file: resolvedPath };
                 },
             }, (error, result) => {
                 if (error) {
@@ -645,11 +597,7 @@ function createScssSidecar(projectRoot) {
     }
 
     function injectMarkup(html, proxyOrigin) {
-        if (!html || typeof html !== 'string') {
-            return html;
-        }
-
-        if (html.includes('sidworks-hot-css')) {
+        if (!html || typeof html !== 'string' || html.includes('sidworks-hot-css')) {
             return html;
         }
 
@@ -709,9 +657,7 @@ function createScssSidecar(projectRoot) {
 
         if (requestPath === HOT_CSS_ROUTE) {
             if (!fs.existsSync(cssOutputPath)) {
-                res.writeHead(404, {
-                    'Content-Type': 'text/plain',
-                });
+                res.writeHead(404, { 'Content-Type': 'text/plain' });
                 res.end('SCSS sidecar CSS not ready');
                 return true;
             }
@@ -727,9 +673,7 @@ function createScssSidecar(projectRoot) {
 
         if (requestPath === HOT_CSS_MAP_ROUTE) {
             if (!fs.existsSync(cssMapOutputPath)) {
-                res.writeHead(404, {
-                    'Content-Type': 'text/plain',
-                });
+                res.writeHead(404, { 'Content-Type': 'text/plain' });
                 res.end('SCSS sidecar source map not ready');
                 return true;
             }

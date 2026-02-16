@@ -13,12 +13,12 @@ const {
     resolveProjectRoot,
     createStorefrontRequire,
 } = require('./runtime-paths');
+const { ANSI, colorize, tag } = require('./utils');
 
 const projectRootPath = resolveProjectRoot(__dirname);
 const storefrontRequire = createStorefrontRequire(projectRootPath);
 const { createProxyMiddleware } = storefrontRequire('http-proxy-middleware');
 
-// Match core `npm run hot-proxy` behavior.
 process.env.NODE_ENV = process.env.NODE_ENV || 'development';
 process.env.MODE = process.env.MODE || 'hot';
 
@@ -28,28 +28,6 @@ const shouldOpenBrowser = process.env.SHOPWARE_STOREFRONT_OPEN_BROWSER !== '0';
 const scssEngine = String(process.env.SHOPWARE_STOREFRONT_SCSS_ENGINE || 'webpack').toLowerCase();
 const disableScss = process.env.SHOPWARE_STOREFRONT_DISABLE_SCSS === '1';
 const noOp = () => {};
-const ANSI = {
-    reset: '\x1b[0m',
-    green: '\x1b[32m',
-    yellow: '\x1b[33m',
-    cyan: '\x1b[36m',
-};
-
-function hasInteractiveTty() {
-    return Boolean(process.stdout && process.stdout.isTTY);
-}
-
-function colorize(text, colorCode) {
-    if (!hasInteractiveTty()) {
-        return text;
-    }
-
-    return `${colorCode}${text}${ANSI.reset}`;
-}
-
-function tag(label, colorCode = ANSI.cyan) {
-    return colorize(`[${label}]`, colorCode);
-}
 
 const themeFilesConfigPath = path.resolve(projectRootPath, 'var/theme-files.json');
 let themeFiles = {};
@@ -301,34 +279,24 @@ if (changeFeedbackWatcher.start()) {
     console.log('[SidworksDevTools] JS/Twig change feedback watcher active');
 }
 
-function closeScssSidecar() {
+function cleanup() {
     if (scssSidecar) {
         scssSidecar.close();
     }
-}
-
-function closeChangeFeedbackWatcher() {
     changeFeedbackWatcher.close();
 }
 
-process.on('SIGINT', closeScssSidecar);
-process.on('SIGTERM', closeScssSidecar);
-process.on('exit', closeScssSidecar);
-process.on('SIGINT', closeChangeFeedbackWatcher);
-process.on('SIGTERM', closeChangeFeedbackWatcher);
-process.on('exit', closeChangeFeedbackWatcher);
+process.once('SIGINT', cleanup);
+process.once('SIGTERM', cleanup);
+process.on('exit', cleanup);
 
 function isDocumentRequest(req) {
-    const secFetchDest = (req.headers['sec-fetch-dest'] || req.headers['Sec-Fetch-Dest'] || '').toLowerCase();
-    const secFetchMode = (req.headers['sec-fetch-mode'] || req.headers['Sec-Fetch-Mode'] || '').toLowerCase();
-    const acceptHeader = typeof req.headers.accept === 'string'
-        ? req.headers.accept.toLowerCase()
-        : '';
+    const accept = typeof req.headers.accept === 'string' ? req.headers.accept : '';
 
     return (
-        secFetchDest === 'document' ||
-        secFetchMode === 'navigate' ||
-        acceptHeader.includes('text/html')
+        req.headers['sec-fetch-dest'] === 'document' ||
+        req.headers['sec-fetch-mode'] === 'navigate' ||
+        accept.includes('text/html')
     );
 }
 
@@ -355,25 +323,18 @@ function openBrowserWithUrl(url) {
 }
 
 function isLineItemRequest(requestUrl) {
-    return (requestUrl || '').indexOf('/checkout/line-item/') !== -1;
+    return (requestUrl || '').includes('/checkout/line-item/');
 }
 
 function isOffcanvasRequest(requestUrl) {
-    return ['/widgets/menu/offcanvas', '/checkout/offcanvas'].some(requestPath => (requestUrl || '').includes(requestPath));
+    const url = requestUrl || '';
+    return url.includes('/widgets/menu/offcanvas') || url.includes('/checkout/offcanvas');
 }
 
 function requiresResponseRewrite(req) {
     const requestUrl = req.url || '';
 
-    if (isLineItemRequest(requestUrl)) {
-        return true;
-    }
-
-    if (isOffcanvasRequest(requestUrl)) {
-        return true;
-    }
-
-    return isDocumentRequest(req);
+    return isLineItemRequest(requestUrl) || isOffcanvasRequest(requestUrl) || isDocumentRequest(req);
 }
 
 function escapeRegExp(value) {
