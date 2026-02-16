@@ -22,11 +22,7 @@ class WatchCommand extends Command
             ->addOption('no-js', null, InputOption::VALUE_NONE, 'Disable JS compilation (core + plugins)')
             ->addOption('no-twig', null, InputOption::VALUE_NONE, 'Disable Twig watch/live reload feedback')
             ->addOption('no-scss', null, InputOption::VALUE_NONE, 'Disable SCSS compilation')
-            ->addOption('open-browser', null, InputOption::VALUE_NONE, 'Auto-open browser on startup')
-            ->addOption('theme-name', null, InputOption::VALUE_REQUIRED, 'Technical theme name passed to theme:dump')
-            ->addOption('theme-id', null, InputOption::VALUE_REQUIRED, 'Theme ID passed to theme:dump')
-            ->addOption('domain-url', null, InputOption::VALUE_REQUIRED, 'Sales channel domain URL passed to theme:dump')
-            ->addOption('pick-theme', null, InputOption::VALUE_NONE, 'Force interactive theme:dump theme/domain picker');
+            ->addOption('open-browser', null, InputOption::VALUE_NONE, 'Auto-open browser on startup');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -67,35 +63,10 @@ class WatchCommand extends Command
         $disableTwig = (bool) $input->getOption('no-twig');
         $disableScss = (bool) $input->getOption('no-scss');
         $openBrowser = (bool) $input->getOption('open-browser');
-        $themeName = $this->normalizeOptionalString($input->getOption('theme-name'));
-        $themeId = $this->normalizeOptionalString($input->getOption('theme-id'));
-        $domainUrl = $this->normalizeOptionalString($input->getOption('domain-url'));
-        $pickThemeOption = (bool) $input->getOption('pick-theme');
-        $canRunThemePicker = $input->isInteractive() && Process::isTtySupported();
-        $hasExplicitThemeSelection = $themeName !== '' || $themeId !== '' || $domainUrl !== '';
-        $pickTheme = $pickThemeOption || (!$hasExplicitThemeSelection && $canRunThemePicker);
         $scssEngine = $this->resolveScssEngine();
 
-        if ($themeName !== '' && $themeId !== '') {
-            $io->error('Use either --theme-name or --theme-id (not both).');
-
-            return self::FAILURE;
-        }
-
-        if ($domainUrl !== '' && $themeId === '') {
-            $io->error('--domain-url requires --theme-id. Use --pick-theme for interactive theme/domain selection.');
-
-            return self::FAILURE;
-        }
-
-        if ($pickThemeOption && ($themeName !== '' || $themeId !== '' || $domainUrl !== '')) {
-            $io->error('--pick-theme cannot be combined with --theme-name, --theme-id, or --domain-url.');
-
-            return self::FAILURE;
-        }
-
-        if ($pickThemeOption && !$canRunThemePicker) {
-            $io->error('--pick-theme requires an interactive TTY terminal.');
+        if (!$input->isInteractive() || !Process::isTtySupported()) {
+            $io->error('sidworks:watch-storefront requires an interactive TTY terminal because theme selection is always prompted.');
 
             return self::FAILURE;
         }
@@ -141,7 +112,7 @@ class WatchCommand extends Command
             }
         }
 
-        $prepExitCode = $this->runPrepCommands($output, $input, $projectRoot, $themeName, $themeId, $domainUrl, $pickTheme);
+        $prepExitCode = $this->runPrepCommands($output, $input, $projectRoot);
         if ($prepExitCode !== 0) {
             return $prepExitCode;
         }
@@ -161,31 +132,9 @@ class WatchCommand extends Command
     private function runPrepCommands(
         OutputInterface $output,
         InputInterface $input,
-        string $projectRoot,
-        string $themeName,
-        string $themeId,
-        string $domainUrl,
-        bool $pickTheme
+        string $projectRoot
     ): int {
-        $hasThemeSelection = $themeName !== '' || $themeId !== '' || $domainUrl !== '' || $pickTheme;
-        if (is_file($projectRoot . '/var/theme-files.json') && !$hasThemeSelection) {
-            return 0;
-        }
-
-        $themeDumpArguments = ['theme:dump'];
-        if ($themeName !== '') {
-            $themeDumpArguments[] = '--theme-name=' . $themeName;
-        }
-
-        if ($themeId !== '') {
-            $themeDumpArguments[] = $themeId;
-        }
-
-        if ($domainUrl !== '') {
-            $themeDumpArguments[] = $domainUrl;
-        }
-
-        return $this->runConsoleCommand($themeDumpArguments, $projectRoot, $output, $input, !$pickTheme);
+        return $this->runConsoleCommand(['theme:dump'], $projectRoot, $output, $input, false);
     }
 
     private function runConsoleCommand(
@@ -724,12 +673,4 @@ class WatchCommand extends Command
         $kill->run();
     }
 
-    private function normalizeOptionalString(mixed $value): string
-    {
-        if (!\is_string($value)) {
-            return '';
-        }
-
-        return trim($value);
-    }
 }

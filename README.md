@@ -116,15 +116,7 @@ bin/console sidworks:watch-storefront --no-twig
 bin/console sidworks:watch-storefront --no-scss
 ```
 
-Theme selection shortcuts:
-
-```bash
-bin/console sidworks:watch-storefront --theme-name=QsoTheme
-bin/console sidworks:watch-storefront --theme-id=018e94f67ba2719da036725041793f30 --domain-url=https://carclean.ddev.site/nl
-bin/console sidworks:watch-storefront --pick-theme
-```
-
-`--domain-url` requires `--theme-id` (or use `--pick-theme` for interactive theme + domain selection).
+Theme/domain selection is always interactive in the console prompt.
 
 ### Template Inspector — Basic Workflow
 
