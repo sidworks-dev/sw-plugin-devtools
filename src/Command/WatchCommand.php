@@ -22,6 +22,7 @@ class WatchCommand extends Command
             ->addOption('no-js', null, InputOption::VALUE_NONE, 'Disable JS compilation (core + plugins)')
             ->addOption('no-twig', null, InputOption::VALUE_NONE, 'Disable Twig watch/live reload feedback')
             ->addOption('no-scss', null, InputOption::VALUE_NONE, 'Disable SCSS compilation')
+            ->addOption('skip-theme-dump', null, InputOption::VALUE_NONE, 'Skip theme:dump before watcher startup')
             ->addOption('open-browser', null, InputOption::VALUE_NONE, 'Auto-open browser on startup');
     }
 
@@ -62,11 +63,12 @@ class WatchCommand extends Command
         $disableJs = (bool) $input->getOption('no-js');
         $disableTwig = (bool) $input->getOption('no-twig');
         $disableScss = (bool) $input->getOption('no-scss');
+        $skipThemeDump = (bool) $input->getOption('skip-theme-dump');
         $openBrowser = (bool) $input->getOption('open-browser');
         $scssEngine = $this->resolveScssEngine();
 
-        if (!$input->isInteractive() || !Process::isTtySupported()) {
-            $io->error('sidworks:watch-storefront requires an interactive TTY terminal because theme selection is always prompted.');
+        if (!$skipThemeDump && (!$input->isInteractive() || !Process::isTtySupported())) {
+            $io->error('sidworks:watch-storefront requires an interactive TTY terminal for theme selection. Use --skip-theme-dump to skip it.');
 
             return self::FAILURE;
         }
@@ -90,7 +92,15 @@ class WatchCommand extends Command
         $assetPort = (int) ($hotEnvironment['STOREFRONT_ASSETS_PORT'] ?? 9999) ?: 9999;
         $this->killProcessesOnPorts([$proxyPort, $assetPort], $io);
 
-        $this->renderStartupOverview($io, $projectRoot, $packageManager, $storefrontApp, $hotProxyScript, $hotEnvironment);
+        $this->renderStartupOverview(
+            $io,
+            $projectRoot,
+            $packageManager,
+            $storefrontApp,
+            $hotProxyScript,
+            $hotEnvironment,
+            $skipThemeDump
+        );
 
         if (!is_dir($storefrontApp . '/node_modules/webpack-dev-server')) {
             $io->writeln('Installing storefront dependencies');
@@ -112,7 +122,7 @@ class WatchCommand extends Command
             }
         }
 
-        $prepExitCode = $this->runPrepCommands($output, $input, $projectRoot);
+        $prepExitCode = $this->runPrepCommands($output, $input, $projectRoot, $skipThemeDump);
         if ($prepExitCode !== 0) {
             return $prepExitCode;
         }
@@ -132,8 +142,18 @@ class WatchCommand extends Command
     private function runPrepCommands(
         OutputInterface $output,
         InputInterface $input,
-        string $projectRoot
+        string $projectRoot,
+        bool $skipThemeDump
     ): int {
+        if ($skipThemeDump) {
+            return 0;
+        }
+
+        $themeCompileExitCode = $this->runConsoleCommand(['theme:compile', '--active-only'], $projectRoot, $output, $input);
+        if ($themeCompileExitCode !== 0) {
+            return $themeCompileExitCode;
+        }
+
         return $this->runConsoleCommand(['theme:dump'], $projectRoot, $output, $input, false);
     }
 
@@ -163,7 +183,8 @@ class WatchCommand extends Command
         string $packageManager,
         string $storefrontApp,
         string $hotProxyScript,
-        array $hotEnvironment
+        array $hotEnvironment,
+        bool $skipThemeDump
     ): void {
         $disableJs = ($hotEnvironment['SHOPWARE_STOREFRONT_DISABLE_JS'] ?? '0') === '1';
         $disableTwig = ($hotEnvironment['SHOPWARE_STOREFRONT_DISABLE_TWIG'] ?? '0') === '1';
@@ -173,35 +194,36 @@ class WatchCommand extends Command
         $io->title('Sidworks Storefront Watcher');
 
         $io->definitionList(
+            ['Package manager' => \sprintf('<info>%s</info>', $packageManager)],
             ['Storefront' => \sprintf('<comment>%s</comment>', $this->formatPathForDisplay($storefrontApp, $projectRoot))],
+            ['Hot proxy runtime' => \sprintf('<comment>%s</comment>', $this->formatPathForDisplay($hotProxyScript, $projectRoot))],
             ['SCSS engine' => \sprintf('<info>%s</info>', $scssEngine)],
             ['Parallelism' => \sprintf('<info>%s</info> cores', $hotEnvironment['SHOPWARE_BUILD_PARALLELISM'])],
         );
 
-        $flags = [];
-        if ($disableJs) {
-            $flags[] = '<comment>JS disabled</comment>';
-        }
-        if ($disableTwig) {
-            $flags[] = '<comment>Twig disabled</comment>';
-        }
-        if ($disableScss) {
-            $flags[] = '<comment>SCSS disabled</comment>';
-        }
-        if (($hotEnvironment['SHOPWARE_STOREFRONT_HOT_CORE_ONLY'] ?? '0') === '1') {
-            $flags[] = '<comment>core-only mode</comment>';
-        }
-        if (($hotEnvironment['SHOPWARE_STOREFRONT_JS_SOURCE_MAP'] ?? '0') === '1') {
-            $flags[] = 'JS source maps';
-        }
-        if (($hotEnvironment['SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP'] ?? '0') === '1') {
-            $flags[] = 'SCSS source maps';
+        $io->table(
+            ['Option', 'State'],
+            [
+                ['Theme dump before start', $this->formatOnOff(!$skipThemeDump, $skipThemeDump ? '--skip-theme-dump' : null)],
+                ['JS compilation', $this->formatOnOff(!$disableJs, $disableJs ? '--no-js' : null)],
+                ['Twig watch', $this->formatOnOff(!$disableTwig, $disableTwig ? '--no-twig' : null)],
+                ['SCSS compilation', $this->formatOnOff(!$disableScss, $disableScss ? '--no-scss' : null)],
+                ['Auto-open browser', $this->formatOnOff(($hotEnvironment['SHOPWARE_STOREFRONT_OPEN_BROWSER'] ?? '0') === '1')],
+            ]
+        );
+    }
+
+    private function formatOnOff(bool $enabled, ?string $offReason = null): string
+    {
+        if ($enabled) {
+            return '<fg=green>[ON]</>';
         }
 
-        if ($flags !== []) {
-            $io->writeln(\sprintf('  <info>Flags:</info> %s', implode(', ', $flags)));
-            $io->newLine();
+        if ($offReason !== null && $offReason !== '') {
+            return \sprintf('<fg=yellow>[OFF]</> <comment>(%s)</comment>', $offReason);
         }
+
+        return '<fg=yellow>[OFF]</>';
     }
 
     private function runPackageInstall(

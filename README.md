@@ -24,7 +24,7 @@ Never hunt for a Twig file again. Sidworks DevTools reveals the exact template a
 - **One command start**: `bin/console sidworks:watch-storefront`
 - **Theme picker by default**: Choose theme + domain directly in the terminal
 - **Fast feedback**: Live SCSS updates with readable JS/Twig/SCSS logs
-- **Simple toggles**: `--no-js`, `--no-twig`, `--no-scss`
+- **Simple toggles**: `--no-js`, `--no-twig`, `--no-scss`, `--skip-theme-dump`
 
 ## Requirements
 
@@ -114,9 +114,10 @@ Common toggles:
 bin/console sidworks:watch-storefront --no-js
 bin/console sidworks:watch-storefront --no-twig
 bin/console sidworks:watch-storefront --no-scss
+bin/console sidworks:watch-storefront --skip-theme-dump
 ```
 
-Theme/domain selection is always interactive in the console prompt.
+By default, the watcher runs `theme:compile --active-only` and then interactive `theme:dump` (unless you pass `--skip-theme-dump`).
 
 ### Template Inspector — Basic Workflow
 
