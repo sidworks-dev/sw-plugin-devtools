@@ -44,6 +44,9 @@ module.exports = function createLiveReloadServer(sslOptions) {
             open: false,
             host: '0.0.0.0',
             server: serverConfig,
+            client: {
+                overlay: false,
+            },
             devMiddleware: {
                 ...(baseDevServer.devMiddleware || {}),
                 stats: verboseWebpackOutput ? { colors: true } : 'errors-only',
