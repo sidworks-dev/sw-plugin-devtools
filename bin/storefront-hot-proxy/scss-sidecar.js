@@ -275,6 +275,80 @@ function resolveAliasMap(themeFiles) {
     return aliasMap;
 }
 
+function stripAnsi(value) {
+    // eslint-disable-next-line no-control-regex
+    return String(value || '').replace(/\u001b\[[0-9;]*m/g, '');
+}
+
+/**
+ * Runs in the browser (serialized into the page). Swaps the stylesheet without a
+ * flash of unstyled content and shows SCSS compile errors as a small toast.
+ */
+function hotCssClient(cssHrefBase, eventsUrl, pageContentVersion) {
+    var linkId = 'sidworks-hot-css';
+    var toastId = 'sidworks-hot-error';
+    var pendingLink = null;
+    if (!document.getElementById(linkId) || typeof EventSource === 'undefined') return;
+
+    function swapCss(version) {
+        var current = document.getElementById(linkId);
+        if (!current) return;
+        if (pendingLink) pendingLink.remove();
+        var next = current.cloneNode();
+        next.removeAttribute('id');
+        next.href = cssHrefBase + '?v=' + version;
+        pendingLink = next;
+        next.onload = function () {
+            if (pendingLink !== next) return;
+            pendingLink = null;
+            current.remove();
+            next.id = linkId;
+        };
+        next.onerror = function () { if (pendingLink === next) { pendingLink = null; next.remove(); } };
+        current.after(next);
+    }
+
+    function showError(message) {
+        var toast = document.getElementById(toastId);
+        if (!toast) {
+            toast = document.createElement('pre');
+            toast.id = toastId;
+            toast.title = 'Click to dismiss';
+            toast.style.cssText = 'position:fixed;z-index:2147483647;right:12px;bottom:12px;max-width:min(720px,calc(100vw - 24px));'
+                + 'max-height:45vh;overflow:auto;margin:0;padding:12px 14px;border-radius:8px;border-left:4px solid #e5484d;'
+                + 'background:#1c1c1f;color:#f2f2f3;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;'
+                + 'box-shadow:0 8px 24px rgba(0,0,0,.35);cursor:pointer';
+            toast.onclick = function () { toast.remove(); };
+            document.body.appendChild(toast);
+        }
+        toast.textContent = 'SCSS compile error\n\n' + message;
+    }
+
+    function clearError() {
+        var toast = document.getElementById(toastId);
+        if (toast) toast.remove();
+    }
+
+    var source = new EventSource(eventsUrl);
+    source.onmessage = function (event) {
+        var payload;
+        try { payload = JSON.parse(event.data || '{}'); } catch (_error) { return; }
+        // Twig/snippet changes: also catches changes made while this page was still loading.
+        if (typeof payload.contentVersion === 'number' && payload.contentVersion > pageContentVersion) {
+            pageContentVersion = payload.contentVersion;
+            window.location.reload();
+            return;
+        }
+        if (payload.type === 'css-update' && payload.version) {
+            clearError();
+            swapCss(payload.version);
+        } else if (payload.type === 'css-error' && payload.message) {
+            if (document.body) showError(payload.message);
+            else document.addEventListener('DOMContentLoaded', function () { showError(payload.message); });
+        }
+    };
+}
+
 function createScssSidecar(projectRoot) {
     const rootPath = projectRoot || resolveProjectRoot(__dirname);
     const storefrontApp = resolveStorefrontApp(rootPath);
@@ -312,6 +386,8 @@ function createScssSidecar(projectRoot) {
         loggedGeneratedEntryInfo: false,
         pendingChangedFiles: new Set(),
         pendingTriggerType: '',
+        lastError: null,
+        contentVersion: 0,
     };
 
     function formatPath(filePath) {
@@ -563,10 +639,15 @@ function createScssSidecar(projectRoot) {
     }
 
     function broadcastCssUpdate() {
-        const payload = JSON.stringify({
-            type: 'css-update',
-            version: state.version,
-        });
+        broadcast({ type: 'css-update', version: state.version });
+    }
+
+    function broadcastCssError(message) {
+        broadcast({ type: 'css-error', message });
+    }
+
+    function broadcast(data) {
+        const payload = JSON.stringify(data);
 
         for (const subscriber of state.subscribers) {
             try {
@@ -630,11 +711,15 @@ function createScssSidecar(projectRoot) {
             }
 
             state.version = Date.now();
+            state.lastError = null;
             updateWatchSet(result.loadedFiles, compileEntryPath);
             broadcastCssUpdate();
             log.status('OK', `compiled (${reasonLabel}) in ${Date.now() - startedAt}ms`);
         } catch (error) {
-            log.status('ERR', `compile failed (${reasonLabel}) after ${Date.now() - startedAt}ms: ${error?.message || error}`, true);
+            const message = stripAnsi(String(error?.message || error));
+            state.lastError = message;
+            broadcastCssError(message);
+            log.status('ERR', `compile failed (${reasonLabel}) after ${Date.now() - startedAt}ms: ${message}`, true);
         } finally {
             state.compileInFlight = false;
 
@@ -796,36 +881,15 @@ function createScssSidecar(projectRoot) {
         });
     }
 
-    function injectMarkup(html, proxyOrigin) {
+    function injectMarkup(html, proxyOrigin, pageContentVersion = state.contentVersion) {
         if (!html || typeof html !== 'string' || html.includes('sidworks-hot-css')) {
             return html;
         }
 
         const cssHrefBase = `${proxyOrigin}${HOT_CSS_ROUTE}`;
         const eventsHref = `${proxyOrigin}${HOT_CSS_EVENTS_ROUTE}`;
-        const snippet = [
-            `<link id="sidworks-hot-css" rel="stylesheet" href="${cssHrefBase}?v=${state.version}">`,
-            '<script>',
-            '(function(){',
-            `  const cssHrefBase = ${JSON.stringify(cssHrefBase)};`,
-            `  const eventsUrl = ${JSON.stringify(eventsHref)};`,
-            '  const linkId = "sidworks-hot-css";',
-            '  const current = document.getElementById(linkId);',
-            '  if (!current) return;',
-            '  let source;',
-            '  try { source = new EventSource(eventsUrl); } catch (_error) { return; }',
-            '  source.onmessage = function(event) {',
-            '    try {',
-            '      const payload = JSON.parse(event.data || "{}");',
-            '      if (payload.type !== "css-update" || !payload.version) return;',
-            '      const link = document.getElementById(linkId);',
-            '      if (!link) return;',
-            '      link.href = cssHrefBase + "?v=" + payload.version;',
-            '    } catch (_error) {}',
-            '  };',
-            '})();',
-            '</script>',
-        ].join('');
+        const snippet = `<link id="sidworks-hot-css" rel="stylesheet" href="${cssHrefBase}?v=${state.version}">`
+            + `<script>(${hotCssClient.toString()})(${JSON.stringify(cssHrefBase)}, ${JSON.stringify(eventsHref)}, ${Number(pageContentVersion) || 0});</script>`;
 
         if (html.includes('</head>')) {
             return html.replace('</head>', `${snippet}</head>`);
@@ -846,7 +910,10 @@ function createScssSidecar(projectRoot) {
             });
 
             state.subscribers.add(res);
-            res.write(`data: ${JSON.stringify({ type: 'connected', version: state.version })}\n\n`);
+            res.write(`data: ${JSON.stringify({ type: 'connected', version: state.version, contentVersion: state.contentVersion })}\n\n`);
+            if (state.lastError) {
+                res.write(`data: ${JSON.stringify({ type: 'css-error', message: state.lastError })}\n\n`);
+            }
 
             req.on('close', () => {
                 state.subscribers.delete(res);
@@ -926,11 +993,27 @@ function createScssSidecar(projectRoot) {
         state.subscribers.clear();
     }
 
+    /**
+     * Bumps the content version and tells every open page to reload. Returns the number of tabs notified.
+     */
+    function notifyContentChange(reason) {
+        state.contentVersion += 1;
+        broadcast({ type: 'reload', contentVersion: state.contentVersion, reason });
+
+        return state.subscribers.size;
+    }
+
+    function getContentVersion() {
+        return state.contentVersion;
+    }
+
     return {
         start,
         close,
         handleInternalRequest,
         injectMarkup,
+        notifyContentChange,
+        getContentVersion,
     };
 }
 

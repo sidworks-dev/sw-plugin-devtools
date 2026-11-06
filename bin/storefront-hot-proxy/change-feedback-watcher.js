@@ -31,6 +31,9 @@ function createChangeFeedbackWatcher(projectRoot, options = {}) {
     const onTranslationChange = typeof options.onTranslationChange === 'function'
         ? options.onTranslationChange
         : null;
+    const onTwigChange = typeof options.onTwigChange === 'function'
+        ? options.onTwigChange
+        : null;
     const twigLog = createLogger('TWIG');
     const translationLog = createLogger('I18N');
 
@@ -38,7 +41,6 @@ function createChangeFeedbackWatcher(projectRoot, options = {}) {
     const recentlyLogged = new Map();
     const twigState = {
         timer: null,
-        waitLogged: false,
         pendingEventType: '',
         pendingFiles: new Set(),
     };
@@ -201,22 +203,22 @@ function createChangeFeedbackWatcher(projectRoot, options = {}) {
 
         twigState.pendingEventType = '';
         twigState.pendingFiles.clear();
-        twigState.waitLogged = false;
 
-        const startedAt = Date.now();
-        twigLog.status('RUN', `reloading (${reasonLabel})`);
-        twigLog.status('OK', `reloaded (${reasonLabel}) in ${Date.now() - startedAt}ms`);
+        // Twig auto_reload (dev) recompiles on the next request, so a browser reload is all that is needed.
+        const clientCount = onTwigChange ? onTwigChange({ eventType: trigger, reasonLabel }) : 0;
+        if (typeof clientCount === 'number' && clientCount > 0) {
+            twigLog.status('OK', `reload sent to ${clientCount} tab${clientCount === 1 ? '' : 's'} (${reasonLabel})`);
+            return;
+        }
+
+        twigLog.status('OK', `changed (${reasonLabel}) - no browser connected`);
     }
 
     function scheduleTwigReloadFeedback(eventType, formattedFile) {
         rememberTwigPending(eventType, formattedFile);
 
+        // Batch rapid saves (IDE save-all, git checkout) into a single reload.
         if (twigState.timer) {
-            if (!twigState.waitLogged) {
-                const queuedFiles = summarizeFiles([...twigState.pendingFiles]);
-                twigLog.status('WAIT', `change queued while reload is running${queuedFiles ? ` (${queuedFiles})` : ''}`);
-                twigState.waitLogged = true;
-            }
             return;
         }
 
@@ -256,7 +258,7 @@ function createChangeFeedbackWatcher(projectRoot, options = {}) {
         translationState.waitLogged = false;
         translationState.inFlight = true;
         const startedAt = Date.now();
-        translationLog.status('RUN', `flushing cache (${reasonLabel})`);
+        translationLog.status('RUN', `invalidating snippet cache (${reasonLabel})`);
 
         try {
             if (onTranslationChange) {
@@ -267,7 +269,7 @@ function createChangeFeedbackWatcher(projectRoot, options = {}) {
                 });
             }
 
-            translationLog.status('OK', `cache flushed + reload triggered (${reasonLabel}) in ${Date.now() - startedAt}ms`);
+            translationLog.status('OK', `snippet cache invalidated + reload triggered (${reasonLabel}) in ${Date.now() - startedAt}ms`);
         } catch (error) {
             translationLog.status('ERR', `cache flush failed (${reasonLabel}) after ${Date.now() - startedAt}ms: ${error?.message || error}`, true);
         } finally {

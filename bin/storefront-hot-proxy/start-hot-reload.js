@@ -29,7 +29,9 @@ const shouldOpenBrowser = process.env.SHOPWARE_STOREFRONT_OPEN_BROWSER !== '0';
 const scssEngine = String(process.env.SHOPWARE_STOREFRONT_SCSS_ENGINE || 'webpack').toLowerCase();
 const disableScss = process.env.SHOPWARE_STOREFRONT_DISABLE_SCSS === '1';
 const translationCacheFlushEnabled = process.env.SHOPWARE_STOREFRONT_TRANSLATION_CACHE_FLUSH !== '0';
-const translationCacheCommandParts = parseCommandParts(process.env.SHOPWARE_STOREFRONT_TRANSLATION_CACHE_COMMAND || 'cache:flush:all');
+// Translation catalogues are cached with this tag; invalidating it is ~3x faster than clearing all
+// caches and keeps the rest (container, Twig, HTTP) warm for the reload that follows.
+const translationCacheCommandParts = parseCommandParts(process.env.SHOPWARE_STOREFRONT_TRANSLATION_CACHE_COMMAND || 'cache:pool:invalidate-tags translation.catalog.all');
 const translationCacheFallbackCommandParts = parseCommandParts(process.env.SHOPWARE_STOREFRONT_TRANSLATION_CACHE_FALLBACK_COMMAND || 'cache:clear:all');
 const noOp = () => {};
 let liveReloadServerInstance = null;
@@ -81,6 +83,9 @@ const lineItemRedirectPattern = /content="0;url='\/checkout\/offcanvas'"/g;
 const profilerPattern = /http[s]?\\u003A\\\/\\\/[\w.]*(:\d*|\\u003A\d*)?\\\/_wdt/gm;
 const xdebugIgnorePattern = /new\s*URL\(url\);\s*url\.searchParams\.set\('XDEBUG_IGNORE'/gm;
 const hotProxyPathPattern = /\/_webpack_hot_proxy_\//g;
+// Core template does `script|replace({'js/': '/_webpack_hot_proxy_/'})`, which also hits bundle names
+// ending in "-js" (e.g. js/foo-js/foo-js.js). Restore the mangled "-js/" segment.
+const mangledHotProxyPathPattern = /\/_webpack_hot_proxy_\/([\w.-]*?-)\/_webpack_hot_proxy_\//g;
 
 const baseProxyOptions = {
     appPort: Number(appUrlEnv.port) || undefined,
@@ -100,9 +105,9 @@ const baseProxyOptions = {
     cookieDomainRewrite: {
         '*': '',
     },
-    cookiePathRewrite: {
-        '*': '',
-    },
+    // Keep upstream cookie paths (e.g. Path=/). Stripping them scopes session cookies
+    // to the request path, which breaks login state across pages.
+    cookiePathRewrite: false,
 };
 
 let scssSidecar = null;
@@ -111,6 +116,7 @@ if (!disableScss && scssEngine === 'sass-cli') {
 }
 
 const changeFeedbackWatcher = createChangeFeedbackWatcher(projectRootPath, {
+    onTwigChange: ({ reasonLabel }) => requestLiveReload(reasonLabel || 'twig'),
     onTranslationChange: async ({ reasonLabel }) => {
         if (translationCacheFlushEnabled) {
             await runShopwareCacheFlush();
@@ -198,6 +204,7 @@ const rewriteProxy = createProxyMiddleware({
                 }
 
                 body = body
+                    .replace(mangledHotProxyPathPattern, '/_webpack_hot_proxy_/$1js/')
                     .replace(hotProxyPathPattern, `${proxyUrlEnv.protocol}//${proxyUrlEnv.hostname}:${assetPort}/`)
                     .replace(appOriginWithSlashPattern, `${proxyUrlEnv.origin}/`)
                     .replace(proxyMediaPattern, `${appUrlEnv.origin}/media/`)
@@ -206,7 +213,7 @@ const rewriteProxy = createProxyMiddleware({
                     .replace(xdebugIgnorePattern, 'new URL(window.location.protocol+\'//\'+window.location.host+url);                url.searchParams.set(\'XDEBUG_IGNORE\'');
 
                 if (scssSidecar && isDocumentRequest(req)) {
-                    body = scssSidecar.injectMarkup(body, proxyUrlEnv.origin);
+                    body = scssSidecar.injectMarkup(body, proxyUrlEnv.origin, req.sidworksContentVersion);
                 }
 
                 res.removeHeader('content-length');
@@ -221,6 +228,10 @@ const proxy = (req, res) => {
     if (scssSidecar && scssSidecar.handleInternalRequest(req, res)) {
         return;
     }
+
+    // Remember which content version this page is rendered from, so a change that lands while the
+    // page is still loading triggers a catch-up reload in the browser.
+    req.sidworksContentVersion = scssSidecar ? scssSidecar.getContentVersion() : 0;
 
     if (requiresResponseRewrite(req)) {
         rewriteProxy(req, res, noOp);
@@ -245,15 +256,16 @@ const server = createLiveReloadServer(sslOptions).catch((e) => {
     return createLiveReloadServer({});
 });
 
-if (scssSidecar) {
-    scssSidecar.start().catch((error) => {
+// Runs in parallel with the webpack build; "Ready" waits for both so the first page load has CSS.
+const scssReady = scssSidecar
+    ? scssSidecar.start().catch((error) => {
         console.error(`[SidworksDevTools] ${tag('SCSS', ANSI.red)} Failed to start sidecar: ${error.message}`);
-    });
-}
+    })
+    : Promise.resolve();
 
 changeFeedbackWatcher.start();
 
-server.then((liveReloadServer) => {
+Promise.all([server, scssReady]).then(([liveReloadServer]) => {
     liveReloadServerInstance = liveReloadServer;
 
     if (pendingReloadReasons.length > 0) {
@@ -286,6 +298,10 @@ server.then((liveReloadServer) => {
     console.log('');
     console.log(`  Storefront  ${colorize(appUrlEnv.origin, ANSI.cyan)}`);
     console.log(`  Hot proxy   ${colorize(proxyUrlEnv.origin, ANSI.green)}`);
+    const prebuiltCount = Number(process.env.SIDWORKS_PREBUILT_PLUGIN_COUNT || 0);
+    if (prebuiltCount > 0) {
+        console.log(`  Vendor JS   ${colorize(`${prebuiltCount} plugins served from dist`, ANSI.gray)} (SHOPWARE_STOREFRONT_WATCH_PLUGINS=name to compile live)`);
+    }
     console.log('');
 
     if (shouldOpenBrowser) {
@@ -394,20 +410,22 @@ function runShopwareConsoleCommand(commandParts) {
 
 function requestLiveReload(reason) {
     const reloadReason = typeof reason === 'string' && reason !== '' ? reason : 'translation-json';
+
+    if (scssSidecar) {
+        return scssSidecar.notifyContentChange(reloadReason);
+    }
+
     const serverInstance = liveReloadServerInstance;
 
     if (!serverInstance || !serverInstance.webSocketServer || !serverInstance.sendMessage) {
         pendingReloadReasons.push(reloadReason);
-        return false;
+        return 0;
     }
 
-    serverInstance.sendMessage(
-        serverInstance.webSocketServer.clients,
-        'static-changed',
-        reloadReason,
-    );
+    const clients = serverInstance.webSocketServer.clients;
+    serverInstance.sendMessage(clients, 'static-changed', reloadReason);
 
-    return true;
+    return clients instanceof Set ? clients.size : (Array.isArray(clients) ? clients.length : 0);
 }
 
 function isLineItemRequest(requestUrl) {

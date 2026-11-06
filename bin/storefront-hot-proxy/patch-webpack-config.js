@@ -1,3 +1,4 @@
+const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { createRequire } = require('node:module');
@@ -151,38 +152,6 @@ function patchScssRule(scssRule, options) {
     scssRule.use = patchedUse;
 }
 
-function patchWatchFiles(coreConfig, options) {
-    if (!coreConfig.devServer) {
-        return;
-    }
-
-    const defaultIgnored = [
-        '**/.git/**',
-        '**/node_modules/**',
-        '**/public/theme/**',
-        '**/var/cache/**',
-    ];
-
-    if (!coreConfig.devServer.watchFiles) {
-        coreConfig.devServer.watchFiles = { options: {} };
-    }
-
-    const watchFiles = coreConfig.devServer.watchFiles;
-    watchFiles.options = watchFiles.options || {};
-
-    if (options.twigWatchMode === 'narrow') {
-        watchFiles.paths = [
-            'custom/plugins/**/src/Resources/views/**/*.twig',
-            'custom/apps/**/Resources/views/**/*.twig',
-            'src/Resources/views/**/*.twig',
-            'templates/**/*.twig',
-            'vendor/shopware/storefront/Resources/views/**/*.twig',
-        ];
-    }
-
-    watchFiles.options.ignored = [...new Set([...toArray(watchFiles.options.ignored), ...defaultIgnored])];
-}
-
 function patchScssSidecarWatchBehavior(configArray) {
     const scssIgnoredPatterns = ['**/*.scss', '**/*.sass'];
 
@@ -282,17 +251,14 @@ function loadPatchedWebpackConfig(explicitProjectRoot) {
     const skipPostCss = asBoolean(process.env.SHOPWARE_STOREFRONT_SKIP_POSTCSS, false);
     const silenceSassDeprecations = asBoolean(process.env.SHOPWARE_STOREFRONT_SASS_SILENCE_DEPRECATIONS, true);
     const disableJs = asBoolean(process.env.SHOPWARE_STOREFRONT_DISABLE_JS, false);
-    const disableTwig = asBoolean(process.env.SHOPWARE_STOREFRONT_DISABLE_TWIG, false);
     const disableScss = asBoolean(process.env.SHOPWARE_STOREFRONT_DISABLE_SCSS, false);
     const verboseWebpackOutput = asBoolean(process.env.SHOPWARE_STOREFRONT_VERBOSE_WEBPACK, false);
     const coreOnlyHotMode = asBoolean(process.env.SHOPWARE_STOREFRONT_HOT_CORE_ONLY, false) || disableJs;
+    const prebuiltVendorPlugins = asBoolean(process.env.SHOPWARE_STOREFRONT_PREBUILT_VENDOR_PLUGINS, true);
     const scssEngine = asString(process.env.SHOPWARE_STOREFRONT_SCSS_ENGINE, 'webpack').toLowerCase();
     const useScssSidecar = !disableScss && scssEngine === 'sass-cli';
-    const twigWatchMode = asString(process.env.SHOPWARE_STOREFRONT_TWIG_WATCH_MODE, 'narrow').toLowerCase();
 
-    if (twigWatchMode === 'narrow' || disableTwig) {
-        process.env.SHOPWARE_STOREFRONT_SKIP_EXTENSION_TWIG_WATCH = '1';
-    }
+    process.env.SHOPWARE_STOREFRONT_SKIP_EXTENSION_TWIG_WATCH = '1';
 
     let sassImplementation;
     try {
@@ -352,6 +318,21 @@ function loadPatchedWebpackConfig(explicitProjectRoot) {
         coreConfig.entry = nextEntry;
     }
 
+    if (useScssSidecar || disableScss) {
+        // The storefront template always requests this entry in HMR mode; answer with an empty
+        // module instead of a 404 (which Chrome reports as an ORB-blocked script).
+        addDevServerMiddleware(coreConfig, 'sidworks-empty-hot-reloading', (req, res, next) => {
+            if (!coreConfig.entry?.['hot-reloading'] && String(req.url || '').split('?')[0] === '/storefront/hot-reloading.js') {
+                res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+                res.setHeader('Access-Control-Allow-Origin', '*');
+                res.end('/* SCSS is served by the Sidworks SCSS sidecar */');
+                return;
+            }
+
+            next();
+        });
+    }
+
     if (useScssSidecar) {
         if (coreConfig.entry && Object.prototype.hasOwnProperty.call(coreConfig.entry, 'hot-reloading')) {
             delete coreConfig.entry['hot-reloading'];
@@ -360,7 +341,9 @@ function loadPatchedWebpackConfig(explicitProjectRoot) {
         patchScssRulesToNoop(configArray);
     }
 
-    if (disableTwig && coreConfig.devServer) {
+    // Twig reloads are driven by change-feedback-watcher (single watcher over all plugin view
+    // directories), so the core chokidar glob watcher would only duplicate work and reloads.
+    if (coreConfig.devServer) {
         delete coreConfig.devServer.watchFiles;
     }
 
@@ -380,20 +363,6 @@ function loadPatchedWebpackConfig(explicitProjectRoot) {
         coreConfig.devServer.liveReload = true;
     }
 
-    if (devCacheEnabled) {
-        coreConfig.cache = {
-            type: 'filesystem',
-            cacheDirectory: path.resolve(projectRoot, 'var/cache/webpack-storefront-hot'),
-            buildDependencies: {
-                config: [coreWebpackConfigPath, __filename],
-            },
-        };
-    }
-
-    if (!disableTwig) {
-        patchWatchFiles(coreConfig, { projectRoot, twigWatchMode });
-    }
-
     if (!useScssSidecar) {
         const scssRule = findScssRule(coreConfig?.module?.rules);
         patchScssRule(scssRule, {
@@ -405,9 +374,40 @@ function loadPatchedWebpackConfig(explicitProjectRoot) {
         });
     }
 
-    const effectiveConfigArray = coreOnlyHotMode ? [coreConfig] : configArray;
+    let effectiveConfigArray = coreOnlyHotMode ? [coreConfig] : [...configArray];
 
-    // coreOnlyHotMode is reflected in the PHP startup overview
+    // Theme SCSS gets its own "hot-reloading" compiler; the sidecar (or --no-scss) makes it dead weight.
+    if (useScssSidecar || disableScss) {
+        effectiveConfigArray = effectiveConfigArray.filter((config) => config === coreConfig || !isHotReloadingOnlyConfig(config));
+    }
+
+    if (!coreOnlyHotMode) {
+        effectiveConfigArray = applyPrebuiltVendorPlugins(effectiveConfigArray, coreConfig, projectRoot, prebuiltVendorPlugins);
+    }
+
+    effectiveConfigArray.forEach((config) => {
+        if (!config || typeof config !== 'object') {
+            return;
+        }
+
+        // Plugin compilers default to eval source maps; skip them unless JS source maps are requested.
+        if (config !== coreConfig && !jsSourceMapEnabled) {
+            config.devtool = false;
+        }
+
+    });
+
+    // Only the (large) core bundle gets a persistent cache. Measured on 55 plugin compilers:
+    // per-plugin filesystem caches made startup and rebuilds slower due to (de)serialization.
+    if (devCacheEnabled) {
+        coreConfig.cache = {
+            type: 'filesystem',
+            cacheDirectory: path.resolve(projectRoot, 'var/cache/webpack-storefront-hot'),
+            buildDependencies: {
+                config: [coreWebpackConfigPath, __filename],
+            },
+        };
+    }
 
     if (!verboseWebpackOutput) {
         stripWebpackBarPlugins(effectiveConfigArray);
@@ -431,13 +431,105 @@ function loadPatchedWebpackConfig(explicitProjectRoot) {
         ? explicitParallelism
         : Math.max(1, detectedCpuCount - 1);
 
-    for (const config of effectiveConfigArray) {
-        if (config && typeof config === 'object') {
-            config.parallelism = parallelismValue;
+    // MultiCompiler reads parallelism from the array itself, not from the individual configs.
+    effectiveConfigArray.parallelism = parallelismValue;
+
+    return effectiveConfigArray;
+}
+
+/**
+ * Plugins installed via Composer (vendor/) don't change while developing and always ship a
+ * production build in Resources/app/storefront/dist. Serve those files from the dev server
+ * instead of compiling them on every start; only project plugins (custom/) are compiled live.
+ *
+ * SHOPWARE_STOREFRONT_WATCH_PLUGINS=name-a,name-b forces live compilation for specific plugins.
+ */
+function applyPrebuiltVendorPlugins(configArray, coreConfig, projectRoot, prebuiltVendorPlugins) {
+    const pluginsJson = readJson(path.resolve(projectRoot, 'var/plugins.json')) || {};
+    const forceWatch = new Set(asString(process.env.SHOPWARE_STOREFRONT_WATCH_PLUGINS, '')
+        .split(',').map((name) => name.trim()).filter(Boolean));
+    const prebuiltDirs = new Map();
+
+    for (const definition of Object.values(pluginsJson)) {
+        const technicalName = typeof definition?.technicalName === 'string' ? definition.technicalName : '';
+        const basePath = typeof definition?.basePath === 'string' ? definition.basePath : '';
+        if (!technicalName || technicalName === 'storefront' || forceWatch.has(technicalName)) {
+            continue;
+        }
+
+        // Plugins without a JS entry but with a shipped dist bundle are never compiled by webpack,
+        // so core hot mode would 404 them. Serve their dist regardless of location.
+        const hasEntry = Boolean(definition?.storefront?.entryFilePath);
+        const absoluteBase = path.resolve(projectRoot, basePath);
+        if (hasEntry && (!prebuiltVendorPlugins || !absoluteBase.startsWith(path.resolve(projectRoot, 'vendor') + path.sep))) {
+            continue;
+        }
+
+        const distDir = path.resolve(absoluteBase, 'Resources/app/storefront/dist/storefront/js', technicalName);
+        if (fs.existsSync(path.join(distDir, `${technicalName}.js`))) {
+            prebuiltDirs.set(technicalName, distDir);
         }
     }
 
-    return effectiveConfigArray;
+    if (prebuiltDirs.size === 0 || !coreConfig.devServer) {
+        return configArray;
+    }
+
+    addDevServerMiddleware(coreConfig, 'sidworks-prebuilt-vendor-plugins', (req, res, next) => serveFromPrebuiltDir(prebuiltDirs, req, res, next));
+
+    process.env.SIDWORKS_PREBUILT_PLUGIN_COUNT = String(prebuiltDirs.size);
+
+    return configArray.filter((config) => config === coreConfig || !prebuiltDirs.has(config?.name));
+}
+
+function addDevServerMiddleware(coreConfig, name, middleware) {
+    if (!coreConfig.devServer) {
+        return;
+    }
+
+    const originalSetupMiddlewares = coreConfig.devServer.setupMiddlewares;
+    coreConfig.devServer.setupMiddlewares = (middlewares, devServer) => {
+        middlewares.unshift({ name, middleware });
+
+        return typeof originalSetupMiddlewares === 'function'
+            ? originalSetupMiddlewares(middlewares, devServer)
+            : middlewares;
+    };
+}
+
+function serveFromPrebuiltDir(prebuiltDirs, req, res, next) {
+    // Entry: /<name>/<name>.js ; async chunks resolve (publicPath "auto" + "../../") to /js/<name>/<chunk>.js
+    const match = /^\/(?:js\/)?([^/]+)\/([^/]+\.js(?:\.map)?)$/.exec(String(req.url || '').split('?')[0]);
+    const distDir = match ? prebuiltDirs.get(match[1]) : null;
+    if (!distDir) {
+        next();
+        return;
+    }
+
+    const filePath = path.resolve(distDir, match[2]);
+    if (!filePath.startsWith(distDir + path.sep) || !fs.existsSync(filePath)) {
+        next();
+        return;
+    }
+
+    res.setHeader('Content-Type', filePath.endsWith('.map') ? 'application/json; charset=utf-8' : 'application/javascript; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    fs.createReadStream(filePath).pipe(res);
+}
+
+function readJson(filePath) {
+    try {
+        return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    } catch (_error) {
+        return null;
+    }
+}
+
+function isHotReloadingOnlyConfig(config) {
+    const entryKeys = config && config.entry && typeof config.entry === 'object' ? Object.keys(config.entry) : [];
+
+    return entryKeys.length === 1 && entryKeys[0] === 'hot-reloading';
 }
 
 module.exports = loadPatchedWebpackConfig;

@@ -21,10 +21,12 @@ Never hunt for a Twig file again. Sidworks DevTools reveals the exact template a
 - **Multi-Editor Support**: Works with PHPStorm and VSCode
 
 ### Optimized Storefront Watcher
-- **One command start**: `bin/console sidworks:watch-storefront`
-- **Theme picker by default**: Choose theme + domain directly in the terminal
-- **Fast feedback**: Live SCSS updates with readable JS/Twig/SCSS logs
-- **Simple toggles**: `--no-js`, `--no-twig`, `--no-scss`, `--skip-theme-dump`
+- **One command start**: `bin/console sidworks:watch-storefront` (warm start to "Ready" in a few seconds)
+- **Remembers your theme**: first run asks for theme + domain, later runs reuse it (`--pick-theme` to change)
+- **Live SCSS without reload**: CSS is swapped in place, compile errors show as a toast in the browser
+- **Twig + snippets**: one watcher over all plugin view/snippet folders triggers a reload; snippet changes only invalidate the translation cache
+- **Fast JS**: only project plugins (`custom/`) are compiled; Composer plugins are served from their shipped `dist` build
+- **Simple toggles**: `--no-js`, `--no-twig`, `--no-scss`, `--skip-theme-dump`, `--compile`
 
 ## Requirements
 
@@ -104,20 +106,36 @@ bin/console sidworks:watch-storefront
 ```
 
 What this gives you:
-- Interactive theme/domain selection by default
-- Fast defaults for day-to-day storefront work
-- Clear terminal output with `[SCSS]`, `[TWIG]`, and `[JS]` log tags
+- Theme/domain selection on the first run, reused afterwards (non-interactive `theme:dump`, ~0.1s)
+- `theme:compile` only when the selected theme was never compiled (hot mode does not need it otherwise)
+- Live SCSS via a persistent `sass-embedded` compiler, swapped in the page without a reload
+- SCSS compile errors in the terminal **and** as a dismissible toast in the browser
+- Twig and snippet changes reload all open tabs (also when a change lands while a page is still loading)
+- Clear terminal output with `[SCSS]`, `[TWIG]`, `[I18N]` and `[JS]` log tags
 
 Common toggles:
 
 ```bash
+bin/console sidworks:watch-storefront --pick-theme       # choose theme + domain again
+bin/console sidworks:watch-storefront --compile          # force theme:compile (e.g. new theme assets)
 bin/console sidworks:watch-storefront --no-js
 bin/console sidworks:watch-storefront --no-twig
 bin/console sidworks:watch-storefront --no-scss
 bin/console sidworks:watch-storefront --skip-theme-dump
 ```
 
-By default, the watcher runs `theme:compile --active-only` and then interactive `theme:dump` (unless you pass `--skip-theme-dump`).
+Environment variables:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SHOPWARE_STOREFRONT_WATCH_PLUGINS` | – | Comma-separated plugin bundle names (e.g. `my-plugin`) to compile live even though they are installed via Composer |
+| `SHOPWARE_STOREFRONT_PREBUILT_VENDOR_PLUGINS` | `1` | Set to `0` to compile every plugin (slower start) |
+| `SHOPWARE_STOREFRONT_TRANSLATION_CACHE_COMMAND` | `cache:pool:invalidate-tags translation.catalog.all` | Command run after a snippet change |
+| `SHOPWARE_STOREFRONT_JS_SOURCE_MAP` | `0` | Enable JS source maps |
+| `SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP` | `1` | SCSS source maps (sass-cli engine) |
+| `SHOPWARE_STOREFRONT_WATCH_PM` | `npm` | Set to `bun` to install dependencies with Bun |
+
+> **Shopware 6.8:** the webpack hot-proxy mode this watcher builds on is deprecated in 6.7 and removed in 6.8 (Vite dev server replaces it). The watcher warns when the `v6.8.0.0` feature flag is active.
 
 ### Template Inspector — Basic Workflow
 

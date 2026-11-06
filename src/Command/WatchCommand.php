@@ -4,6 +4,7 @@ namespace Sidworks\DevTools\Command;
 
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
+use Symfony\Component\Console\Input\ArrayInput;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
@@ -23,6 +24,8 @@ class WatchCommand extends Command
             ->addOption('no-twig', null, InputOption::VALUE_NONE, 'Disable Twig watch/live reload feedback')
             ->addOption('no-scss', null, InputOption::VALUE_NONE, 'Disable SCSS compilation')
             ->addOption('skip-theme-dump', null, InputOption::VALUE_NONE, 'Skip theme:dump before watcher startup')
+            ->addOption('pick-theme', null, InputOption::VALUE_NONE, 'Choose theme + domain interactively instead of reusing the last selection')
+            ->addOption('compile', null, InputOption::VALUE_NONE, 'Force theme:compile before startup (default: only when the theme was never compiled)')
             ->addOption('open-browser', null, InputOption::VALUE_NONE, 'Auto-open browser on startup');
     }
 
@@ -65,10 +68,13 @@ class WatchCommand extends Command
         $disableScss = (bool) $input->getOption('no-scss');
         $skipThemeDump = (bool) $input->getOption('skip-theme-dump');
         $openBrowser = (bool) $input->getOption('open-browser');
+        $forceCompile = (bool) $input->getOption('compile');
         $scssEngine = $this->resolveScssEngine();
+        $lastTheme = $this->readDumpedTheme($projectRoot);
+        $pickTheme = (bool) $input->getOption('pick-theme') || $lastTheme === null;
 
-        if (!$skipThemeDump && (!$input->isInteractive() || !Process::isTtySupported())) {
-            $io->error('sidworks:watch-storefront requires an interactive TTY terminal for theme selection. Use --skip-theme-dump to skip it.');
+        if (!$skipThemeDump && $pickTheme && !$this->canPrompt($input)) {
+            $io->error('Theme selection requires an interactive TTY terminal. Run once interactively, or use --skip-theme-dump.');
 
             return self::FAILURE;
         }
@@ -99,8 +105,12 @@ class WatchCommand extends Command
             $storefrontApp,
             $hotProxyScript,
             $hotEnvironment,
-            $skipThemeDump
+            $skipThemeDump,
+            $pickTheme ? null : $lastTheme,
+            $forceCompile
         );
+
+        $this->warnAboutUnsupportedSetup($io, $nodeBinary, $storefrontApp, $packageManager);
 
         if (!is_dir($storefrontApp . '/node_modules/webpack-dev-server')) {
             $io->writeln('Installing storefront dependencies');
@@ -122,7 +132,7 @@ class WatchCommand extends Command
             }
         }
 
-        $prepExitCode = $this->runPrepCommands($output, $input, $projectRoot, $skipThemeDump);
+        $prepExitCode = $this->runPrepCommands($output, $input, $io, $projectRoot, $skipThemeDump, $pickTheme ? null : $lastTheme, $forceCompile);
         if ($prepExitCode !== 0) {
             return $prepExitCode;
         }
@@ -139,22 +149,127 @@ class WatchCommand extends Command
         return $this->runProcess($watchProcess, $output, $input);
     }
 
+    /**
+     * @param array{themeId: string, domainUrl: string}|null $reuseTheme
+     */
     private function runPrepCommands(
         OutputInterface $output,
         InputInterface $input,
+        SymfonyStyle $io,
         string $projectRoot,
-        bool $skipThemeDump
+        bool $skipThemeDump,
+        ?array $reuseTheme,
+        bool $forceCompile
     ): int {
         if ($skipThemeDump) {
             return 0;
         }
 
-        $themeCompileExitCode = $this->runConsoleCommand(['theme:compile', '--active-only'], $projectRoot, $output, $input);
-        if ($themeCompileExitCode !== 0) {
-            return $themeCompileExitCode;
+        $dumpExitCode = 1;
+        if ($reuseTheme !== null) {
+            // Non-interactive dump (~1s) keeps var/theme-files.json in sync with installed plugins.
+            $dumpExitCode = $this->runShopwareCommand(
+                'theme:dump',
+                ['theme-id' => $reuseTheme['themeId'], 'domain-url' => $reuseTheme['domainUrl']],
+                ['theme:dump', $reuseTheme['themeId'], $reuseTheme['domainUrl']],
+                $projectRoot,
+                $output,
+                $input
+            );
+
+            if ($dumpExitCode !== 0) {
+                if (!$this->canPrompt($input)) {
+                    return $dumpExitCode;
+                }
+
+                $io->warning('Reusing the last theme selection failed. Please pick a theme.');
+            }
         }
 
-        return $this->runConsoleCommand(['theme:dump'], $projectRoot, $output, $input, false);
+        if ($dumpExitCode !== 0) {
+            $dumpExitCode = $this->runShopwareCommand('theme:dump', [], ['theme:dump'], $projectRoot, $output, $input, false);
+            if ($dumpExitCode !== 0) {
+                return $dumpExitCode;
+            }
+        }
+
+        // In hot mode CSS comes from the SCSS sidecar/webpack and JS from webpack-dev-server,
+        // so a full theme:compile is only needed to publish theme assets (fonts, images) once.
+        $themeId = $this->readDumpedTheme($projectRoot)['themeId'] ?? null;
+        if (!$forceCompile && $this->isThemeCompiled($projectRoot, $themeId)) {
+            return 0;
+        }
+
+        return $this->runShopwareCommand('theme:compile', ['--active-only' => true], ['theme:compile', '--active-only'], $projectRoot, $output, $input);
+    }
+
+    /**
+     * Runs a Shopware command inside this already-booted kernel (saves a full kernel boot per command),
+     * falling back to a bin/console subprocess when the command is not available here.
+     *
+     * @param array<string, mixed> $parameters
+     * @param list<string> $cliArguments
+     */
+    private function runShopwareCommand(
+        string $name,
+        array $parameters,
+        array $cliArguments,
+        string $projectRoot,
+        OutputInterface $output,
+        InputInterface $input,
+        bool $nonInteractive = true
+    ): int {
+        $application = $this->getApplication();
+        if ($application === null || !$application->has($name)) {
+            return $this->runConsoleCommand($cliArguments, $projectRoot, $output, $input, $nonInteractive);
+        }
+
+        $commandInput = new ArrayInput(['command' => $name, ...$parameters]);
+        $commandInput->setInteractive(!$nonInteractive && $input->isInteractive());
+
+        try {
+            return $application->find($name)->run($commandInput, $output);
+        } catch (\Throwable $exception) {
+            $output->writeln(\sprintf('<error>%s failed: %s</error>', $name, $exception->getMessage()));
+
+            return self::FAILURE;
+        }
+    }
+
+    /**
+     * @return array{themeId: string, domainUrl: string}|null
+     */
+    private function readDumpedTheme(string $projectRoot): ?array
+    {
+        $content = @file_get_contents($projectRoot . '/var/theme-files.json');
+        if ($content === false) {
+            return null;
+        }
+
+        $data = json_decode($content, true);
+        $themeId = \is_array($data) && \is_string($data['themeId'] ?? null) ? $data['themeId'] : '';
+        $domainUrl = \is_array($data) && \is_string($data['domainUrl'] ?? null) ? $data['domainUrl'] : '';
+
+        if ($themeId === '' || $domainUrl === '') {
+            return null;
+        }
+
+        return ['themeId' => $themeId, 'domainUrl' => $domainUrl];
+    }
+
+    private function isThemeCompiled(string $projectRoot, ?string $themeId): bool
+    {
+        if ($themeId === null || $themeId === '' || preg_match('/^[a-f0-9]{32}$/i', $themeId) !== 1) {
+            return false;
+        }
+
+        // Shopware 6.7 publishes compiled themes to public/theme/<themeId>.
+        return is_dir($projectRoot . '/public/theme/' . $themeId);
+    }
+
+    private function canPrompt(InputInterface $input): bool
+    {
+        return $input->isInteractive() && Process::isTtySupported();
     }
 
     private function runConsoleCommand(
@@ -184,7 +299,9 @@ class WatchCommand extends Command
         string $storefrontApp,
         string $hotProxyScript,
         array $hotEnvironment,
-        bool $skipThemeDump
+        bool $skipThemeDump,
+        ?array $reuseTheme,
+        bool $forceCompile
     ): void {
         $disableJs = ($hotEnvironment['SHOPWARE_STOREFRONT_DISABLE_JS'] ?? '0') === '1';
         $disableTwig = ($hotEnvironment['SHOPWARE_STOREFRONT_DISABLE_TWIG'] ?? '0') === '1';
@@ -204,13 +321,30 @@ class WatchCommand extends Command
         $io->table(
             ['Option', 'State'],
             [
-                ['Theme dump before start', $this->formatOnOff(!$skipThemeDump, $skipThemeDump ? '--skip-theme-dump' : null)],
+                ['Theme', $this->formatThemeState($skipThemeDump, $reuseTheme)],
+                ['Theme compile', $skipThemeDump ? '<fg=yellow>[OFF]</> <comment>(--skip-theme-dump)</comment>' : ($forceCompile ? '<fg=green>[ON]</> <comment>(--compile)</comment>' : '<fg=green>[AUTO]</> <comment>(only if not compiled yet, --compile to force)</comment>')],
                 ['JS compilation', $this->formatOnOff(!$disableJs, $disableJs ? '--no-js' : null)],
                 ['Twig watch', $this->formatOnOff(!$disableTwig, $disableTwig ? '--no-twig' : null)],
                 ['SCSS compilation', $this->formatOnOff(!$disableScss, $disableScss ? '--no-scss' : null)],
                 ['Auto-open browser', $this->formatOnOff(($hotEnvironment['SHOPWARE_STOREFRONT_OPEN_BROWSER'] ?? '0') === '1')],
             ]
         );
+    }
+
+    /**
+     * @param array{themeId: string, domainUrl: string}|null $reuseTheme
+     */
+    private function formatThemeState(bool $skipThemeDump, ?array $reuseTheme): string
+    {
+        if ($skipThemeDump) {
+            return '<fg=yellow>[KEEP]</> <comment>(--skip-theme-dump)</comment>';
+        }
+
+        if ($reuseTheme === null) {
+            return '<fg=green>[PICK]</> <comment>(interactive)</comment>';
+        }
+
+        return \sprintf('<fg=green>[REUSE]</> %s <comment>(--pick-theme to change)</comment>', $reuseTheme['domainUrl']);
     }
 
     private function formatOnOff(bool $enabled, ?string $offReason = null): string
@@ -235,7 +369,7 @@ class WatchCommand extends Command
     ): int {
         $command = $packageManager === 'bun'
             ? ['bun', 'install', '--cwd', $path]
-            : ['npm', 'install', '--prefix', $path, '--prefer-offline', '--no-audit', '--fund=false'];
+            : ['npm', 'install', '--prefix', $path, '--prefer-offline', '--no-audit', '--fund=false', '--loglevel=error'];
 
         $process = new Process($command, $projectRoot, null, null, null);
 
@@ -258,7 +392,7 @@ class WatchCommand extends Command
 
         $command = $packageManager === 'bun'
             ? ['bun', 'add', '-d', 'sass-embedded', '--cwd', $storefrontApp]
-            : ['npm', 'install', '--prefix', $storefrontApp, '--save-dev', 'sass-embedded', '--prefer-offline', '--no-audit', '--fund=false'];
+            : ['npm', 'install', '--prefix', $storefrontApp, '--save-dev', 'sass-embedded', '--prefer-offline', '--no-audit', '--fund=false', '--loglevel=error'];
 
         $process = new Process($command, $projectRoot, null, null, null);
         $exitCode = $this->runProcess($process, $output, $input);
@@ -314,6 +448,12 @@ class WatchCommand extends Command
             $packagePath = \dirname($sourcePath);
 
             if (!is_file($packagePath . '/package.json') || is_dir($packagePath . '/node_modules')) {
+                continue;
+            }
+
+            // A package.json without dependencies never gets a node_modules dir; don't reinstall on every start.
+            $packageJson = json_decode((string) @file_get_contents($packagePath . '/package.json'), true);
+            if (!\is_array($packageJson) || (empty($packageJson['dependencies']) && empty($packageJson['devDependencies']))) {
                 continue;
             }
 
@@ -379,7 +519,6 @@ class WatchCommand extends Command
             $buildParallelism = (string) max(1, $this->detectCpuCount() - 1);
         }
 
-        $twigWatchMode = $disableTwig ? 'off' : 'narrow';
         $useSassEmbedded = $this->env('SHOPWARE_STOREFRONT_USE_SASS_EMBEDDED', '1');
         $scssSourceMapEnabled = $this->env(
             'SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP',
@@ -399,7 +538,6 @@ class WatchCommand extends Command
             'SHOPWARE_STOREFRONT_DEV_CACHE' => $this->env('SHOPWARE_STOREFRONT_DEV_CACHE', '1'),
             'SHOPWARE_STOREFRONT_USE_SASS_EMBEDDED' => $useSassEmbedded,
             'SHOPWARE_STOREFRONT_HOT_CORE_ONLY' => $disableJs ? '1' : '0',
-            'SHOPWARE_STOREFRONT_TWIG_WATCH_MODE' => $twigWatchMode,
             'SHOPWARE_STOREFRONT_JS_SOURCE_MAP' => $this->env('SHOPWARE_STOREFRONT_JS_SOURCE_MAP', '0'),
             'SHOPWARE_STOREFRONT_SCSS_SOURCE_MAP' => $scssSourceMapEnabled,
             'SHOPWARE_STOREFRONT_SCSS_ENGINE' => $scssEngine,
@@ -415,10 +553,6 @@ class WatchCommand extends Command
             $useSassEmbedded === '1',
             $disableScss
         ) ? '1' : '0';
-
-        if ($twigWatchMode === 'narrow' || $twigWatchMode === 'off') {
-            $environment['SHOPWARE_STOREFRONT_SKIP_EXTENSION_TWIG_WATCH'] = '1';
-        }
 
         return $environment;
     }
@@ -440,13 +574,108 @@ class WatchCommand extends Command
     private function detectCpuCount(): int
     {
         $contents = @file_get_contents('/proc/cpuinfo');
-        if (!$contents) {
-            return 2;
+        if ($contents) {
+            preg_match_all('/^processor\s*:/m', $contents, $matches);
+            if (!empty($matches[0])) {
+                return \count($matches[0]);
+            }
         }
 
-        preg_match_all('/^processor\s*:/m', $contents, $matches);
+        // macOS / BSD (native, non-Docker setups)
+        $sysctl = new Process(['sysctl', '-n', 'hw.ncpu']);
+        $sysctl->run();
+        $count = (int) trim($sysctl->getOutput());
 
-        return !empty($matches[0]) ? \count($matches[0]) : 2;
+        return $count > 0 ? $count : 2;
+    }
+
+    private function warnAboutUnsupportedSetup(SymfonyStyle $io, string $nodeBinary, string $storefrontApp, string $packageManager): void
+    {
+        if ($this->isFeatureActive('v6.8.0.0')) {
+            $io->warning('Feature flag v6.8.0.0 is active: Shopware no longer renders the webpack hot-proxy assets, so JS/SCSS hot reload will not work.');
+        }
+
+        $packageJson = json_decode((string) @file_get_contents($storefrontApp . '/package.json'), true);
+        $engines = \is_array($packageJson['engines'] ?? null) ? $packageJson['engines'] : [];
+        $problems = [];
+
+        foreach (['node' => $nodeBinary, 'npm' => $packageManager === 'npm' ? 'npm' : null] as $tool => $binary) {
+            $range = \is_string($engines[$tool] ?? null) ? $engines[$tool] : '';
+            if ($binary === null || $range === '') {
+                continue;
+            }
+
+            $process = new Process([$binary, '--version']);
+            $process->run();
+            $version = ltrim(trim($process->getOutput()), 'v');
+            if ($version !== '' && !$this->satisfiesVersionRange($version, $range)) {
+                $problems[] = \sprintf('%s %s (needs %s)', $tool, $version, $range);
+            }
+        }
+
+        if ($problems !== []) {
+            $io->writeln(\sprintf(
+                '<fg=yellow>[WARN]</> Storefront engine mismatch: %s. DDEV: set <comment>nodejs_version: "24"</comment> in .ddev/config.yaml.',
+                implode(', ', $problems)
+            ));
+        }
+    }
+
+    private function isFeatureActive(string $feature): bool
+    {
+        $featureClass = 'Shopware\\Core\\Framework\\Feature';
+
+        try {
+            return class_exists($featureClass) && $featureClass::has($feature) && $featureClass::isActive($feature);
+        } catch (\Throwable) {
+            return false;
+        }
+    }
+
+    /**
+     * Minimal semver range check for package.json "engines" (supports ||, ^, ~, >=, >, <=, <, =).
+     */
+    private function satisfiesVersionRange(string $version, string $range): bool
+    {
+        foreach (explode('||', $range) as $set) {
+            $comparators = preg_split('/\s+/', trim($set), -1, \PREG_SPLIT_NO_EMPTY) ?: [];
+            $matches = true;
+
+            foreach ($comparators as $comparator) {
+                if ($comparator === '*' || $comparator === 'x') {
+                    continue;
+                }
+
+                if (preg_match('/^(\^|~|>=|<=|>|<|=)?v?(\d+)(?:\.(\d+))?(?:\.(\d+))?/', $comparator, $m) !== 1) {
+                    continue;
+                }
+
+                $major = (int) $m[2];
+                $minor = (int) ($m[3] ?? 0);
+                $target = \sprintf('%d.%d.%d', $major, $minor, (int) ($m[4] ?? 0));
+                [$currentMajor, $currentMinor] = array_map('intval', array_pad(explode('.', $version), 2, '0'));
+
+                $matches = match ($m[1] !== '' ? $m[1] : '=') {
+                    '^' => version_compare($version, $target, '>=') && $currentMajor === $major,
+                    '~' => version_compare($version, $target, '>=') && $currentMajor === $major && $currentMinor === $minor,
+                    '>=' => version_compare($version, $target, '>='),
+                    '>' => version_compare($version, $target, '>'),
+                    '<=' => version_compare($version, $target, '<='),
+                    '<' => version_compare($version, $target, '<'),
+                    default => version_compare($version, $target, '=='),
+                };
+
+                if (!$matches) {
+                    break;
+                }
+            }
+
+            if ($matches) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function resolveStorefrontApp(string $projectRoot): string
