@@ -7,6 +7,7 @@ use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\ArrayInput;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
+use Symfony\Component\Console\Output\NullOutput;
 use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Console\Style\SymfonyStyle;
 use Symfony\Component\Process\Process;
@@ -161,6 +162,15 @@ class WatchCommand extends Command
         ?array $reuseTheme,
         bool $forceCompile
     ): int {
+        // Keep var/plugins.json and var/config_js_features.json in sync with installed plugins
+        // (e.g. after composer update). Webpack, the SCSS sidecar and the file watcher read them.
+        foreach (['bundle:dump', 'feature:dump'] as $dumpCommand) {
+            $exitCode = $this->runShopwareCommand($dumpCommand, [], [$dumpCommand], $projectRoot, new NullOutput(), $input);
+            if ($exitCode !== 0) {
+                $io->warning(\sprintf('%s failed (exit code %d), continuing with the existing dump.', $dumpCommand, $exitCode));
+            }
+        }
+
         if ($skipThemeDump) {
             return 0;
         }

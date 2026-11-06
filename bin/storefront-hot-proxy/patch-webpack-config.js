@@ -385,6 +385,22 @@ function loadPatchedWebpackConfig(explicitProjectRoot) {
         effectiveConfigArray = applyPrebuiltVendorPlugins(effectiveConfigArray, coreConfig, projectRoot, prebuiltVendorPlugins);
     }
 
+    // A stale var/plugins.json can point to entry files that no longer exist (plugin updated or
+    // removed). Skip those compilers instead of failing the whole build.
+    effectiveConfigArray = effectiveConfigArray.filter((config) => {
+        if (config === coreConfig) {
+            return true;
+        }
+
+        const missing = listEntryFiles(config).filter((file) => !fs.existsSync(file));
+        if (missing.length > 0) {
+            console.warn(`[SidworksDevTools] [JS] [SKIP] ${config?.name || 'plugin'}: entry not found (${missing[0]}). Run bin/console bundle:dump.`);
+            return false;
+        }
+
+        return true;
+    });
+
     effectiveConfigArray.forEach((config) => {
         if (!config || typeof config !== 'object') {
             return;
@@ -524,6 +540,15 @@ function readJson(filePath) {
     } catch (_error) {
         return null;
     }
+}
+
+function listEntryFiles(config) {
+    const entries = config && config.entry && typeof config.entry === 'object' ? Object.values(config.entry) : [];
+
+    return entries
+        .flatMap((entry) => (Array.isArray(entry) ? entry : [entry?.import ?? entry]))
+        .flat()
+        .filter((file) => typeof file === 'string' && path.isAbsolute(file));
 }
 
 function isHotReloadingOnlyConfig(config) {
