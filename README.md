@@ -234,6 +234,16 @@ MIT License - See [LICENSE](LICENSE.md) file for details
 **Sidworks**
 Website: [www.sidworks.nl](https://www.sidworks.nl)
 
+## Tests
+
+With the plugin installed in a Shopware project that provides PHPUnit, run from the Shopware project root:
+
+```bash
+vendor/bin/phpunit --configuration custom/plugins/SidworksDevTools/phpunit.xml.dist
+```
+
+The tests cover debug marker cleanup with large HTML attributes, both quote styles, and responses where debugging must stay disabled.
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit issues or pull requests.

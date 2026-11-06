@@ -88,12 +88,11 @@ class ResponseSubscriber implements EventSubscriberInterface
      */
     private function removeCommentsFromAttributes(string $content): string
     {
-        // Simple approach: find all attribute values (text between ="" quotes)
-        // and remove SWDT comments from them
+        // Match quoted values without a repeated alternation: large data attributes
+        // otherwise exhaust PCRE's JIT stack and leave every attribute uncleaned.
         $result = preg_replace_callback(
-            '/(\w+)="((?:[^"\\\\]|\\\\.)*)"/s',
+            '/([\w:-]+\s*=\s*)("[^"]*"|\'[^\']*\')/s',
             function ($matches) {
-                $attrName = $matches[1];
                 $attrValue = $matches[2];
 
                 // Remove all SWDT_START and SWDT_END comments from the attribute value
@@ -103,7 +102,7 @@ class ResponseSubscriber implements EventSubscriberInterface
                     $attrValue
                 );
 
-                return $attrName . '="' . $cleanedValue . '"';
+                return $matches[1] . $cleanedValue;
             },
             $content
         );
